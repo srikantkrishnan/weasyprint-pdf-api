@@ -1,20 +1,35 @@
-# https://doc.courtbouillon.org/weasyprint/stable/first_steps.html#alpine-3-12
+# Use a Debian-based image with Python
+FROM python:3.11-slim
 
-FROM alpine:3.18
+# Install OS dependencies for WeasyPrint
+RUN apt-get update && apt-get install -y \
+    build-essential \
+    libpango-1.0-0 \
+    libpangocairo-1.0-0 \
+    libcairo2 \
+    libgdk-pixbuf2.0-0 \
+    libffi-dev \
+    libxml2 \
+    libxslt1-dev \
+    libjpeg-dev \
+    fonts-liberation \
+    fonts-dejavu \
+    fonts-freefont-ttf \
+    curl \
+    && apt-get clean
 
-EXPOSE 8000
-ENV PORT=8000
-
+# Set working directory
 WORKDIR /app
 
-RUN apk add --no-cache \
-  py3-pip py3-pillow py3-cffi py3-brotli gcc musl-dev python3-dev pango \
-  ttf-dejavu ttf-droid ttf-freefont ttf-liberation font-noto font-noto-cjk
+# Copy requirements and install
+COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
 
-COPY ./requirements.txt /app/requirements.txt
+# Copy your app
+COPY ./app /app
 
-RUN pip3 install -r requirements.txt
+# Expose FastAPI port
+EXPOSE 8000
 
-COPY ./app/main.py /app/
-
-CMD ["sh", "-c", "uvicorn main:app --host=0.0.0.0 --port=$PORT"]
+# Run the server
+CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000"]
