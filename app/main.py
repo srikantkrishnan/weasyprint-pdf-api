@@ -1,36 +1,29 @@
-import io
-from typing import Union
-
-from fastapi import FastAPI, Response
-from fastapi.responses import StreamingResponse
+from fastapi import FastAPI, HTTPException
+from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
-
 from weasyprint import HTML
+from starlette.responses import Response
 
-class PrintPdfRequest(BaseModel):
+class HTMLPayload(BaseModel):
     html: str
-    filename: str = 'weasyprint'
 
-# https://fastapi.tiangolo.com/
 app = FastAPI()
 
+# Allow only your Lovable app domain — replace if needed
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=[
+        "https://3c765d59-016f-4d50-bdcc-20491cc9a7e6.lovableproject.com"
+    ],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
 @app.post("/pdfs")
-async def print_pdf(response: Response, body: PrintPdfRequest):
-    # https://doc.courtbouillon.org/weasyprint/stable/first_steps.html#rendering-to-a-single-file
-    byte_string = HTML(string=body.html).write_pdf()
-
-    if not body.filename.strip():
-        filename = 'weasyprint'
-    else:
-        filename = body.filename.strip()
-
-    headers = {
-        'Content-Type': 'application/pdf',
-        'Content-Disposition': '%s; name="%s"; filename="%s.%s"' % (
-            'attachment',
-            filename,
-            filename,
-            'pdf'
-        )
-    }
-    return StreamingResponse(io.BytesIO(byte_string), headers=headers)
+async def print_pdf(body: HTMLPayload):
+    try:
+        byte_string = HTML(string=body.html).write_pdf()
+        return Response(content=byte_string, media_type="application/pdf")
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"PDF generation failed: {e}")
