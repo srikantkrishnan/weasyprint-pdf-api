@@ -1,3 +1,4 @@
-weasyprint==v59.0
+weasyprint==59.0
 fastapi==0.103.1
 uvicorn[standard]==0.23.2
+pydyf==0.8.0
