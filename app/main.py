@@ -35,11 +35,11 @@ async def print_signed_pdf(body: SignedPDFPayload):
         key_bytes = base64.b64decode(body.private_key_pem)
         password = body.key_password.encode() if body.key_password else None
 
-        # Create a SimpleSigner
+        # Correct param: key_passphrase instead of passphrase
         signer = signers.SimpleSigner.load(
             cert_bytes,
             key_bytes,
-            passphrase=password
+            key_passphrase=password
         )
 
         # Sign the PDF
