@@ -14,7 +14,6 @@ import io
 import logging
 import pyhanko
 
-# Log PyHanko version in Render logs
 logging.warning(f"🚀 Using PyHanko version: {pyhanko.__version__}")
 
 class SignPayload(BaseModel):
@@ -22,11 +21,10 @@ class SignPayload(BaseModel):
     base_url: str = ""
     certificate_pem: str
     private_key_pem: str
-    key_password: str = ""  # optional, unused if key unencrypted
+    key_password: str = ""
 
 app = FastAPI()
 
-# Allow all origins for testing; restrict later for production
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -38,20 +36,17 @@ app.add_middleware(
 @app.post("/pdfs/signed")
 async def signed_pdf(body: SignPayload):
     try:
-        # Generate unsigned PDF
         pdf_bytes = HTML(string=body.html, base_url=body.base_url).write_pdf()
-
-        # Decode cert and key
         cert_bytes = base64.b64decode(body.certificate_pem)
         key_bytes = base64.b64decode(body.private_key_pem)
 
-        # Load cert & key manually
-        cert_obj = x509.load_pem_x509_certificate(cert_bytes, default_backend())
+        # Load private key and certificate
         private_key_obj = load_pem_private_key(
             key_bytes,
             password=body.key_password.encode() if body.key_password else None,
             backend=default_backend()
         )
+        cert_obj = x509.load_pem_x509_certificate(cert_bytes, default_backend())
 
         signer = SimpleSigner(
             signing_cert=cert_obj,
@@ -59,13 +54,13 @@ async def signed_pdf(body: SignPayload):
             cert_registry=None
         )
 
-        # Sign the PDF
         pdf_stream = io.BytesIO(pdf_bytes)
         out = io.BytesIO()
 
+        # New pyHanko API (>=0.20.0)
         sign_pdf(
-            pdf_out=out,
             pdf_in=pdf_stream,
+            pdf_out=out,
             signer=signer,
             field_spec=SigFieldSpec(sig_field_name="SecretarySignature")
         )
