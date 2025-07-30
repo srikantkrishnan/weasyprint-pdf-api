@@ -3,13 +3,13 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from starlette.responses import Response
 from weasyprint import HTML
-from pyhanko.sign import signers
-from pyhanko.sign.general import sign_pdf, PdfSignatureMetadata
-from pyhanko.pdf_utils.incremental_writer import IncrementalPdfFileWriter
+from pyhanko.sign.signers import SimpleSigner
 from pyhanko.sign.fields import SigFieldSpec
+from pyhanko.sign.general import PdfSigner, PdfSignatureMetadata
 from cryptography.hazmat.primitives.serialization import load_pem_private_key
 from cryptography.hazmat.backends import default_backend
 from cryptography import x509
+from pyhanko.pdf_utils.incremental_writer import IncrementalPdfFileWriter
 import base64
 import io
 import logging
@@ -28,7 +28,7 @@ app = FastAPI()
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # restrict in production
+    allow_origins=["*"],  # tighten later in prod
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -37,30 +37,39 @@ app.add_middleware(
 @app.post("/pdfs/signed")
 async def signed_pdf(body: SignPayload):
     try:
-        # Generate unsigned PDF
+        # Step 1: Generate unsigned PDF
         pdf_bytes = HTML(string=body.html, base_url=body.base_url).write_pdf()
 
-        # Decode PEM inputs
+        # Step 2: Decode cert + key
         cert_bytes = base64.b64decode(body.certificate_pem)
         key_bytes = base64.b64decode(body.private_key_pem)
 
-        private_key = load_pem_private_key(
+        private_key_obj = load_pem_private_key(
             key_bytes,
             password=body.key_password.encode() if body.key_password else None,
             backend=default_backend()
         )
-        cert = x509.load_pem_x509_certificate(cert_bytes, default_backend())
+        cert_obj = x509.load_pem_x509_certificate(cert_bytes, default_backend())
 
-        signer = signers.SimpleSigner(
-            signing_cert=cert,
-            signing_key=private_key,
+        # Step 3: Setup signer
+        signer = SimpleSigner(
+            signing_cert=cert_obj,
+            signing_key=private_key_obj,
             cert_registry=None
         )
 
-        pdf_in = io.BytesIO(pdf_bytes)
-        pdf_writer = IncrementalPdfFileWriter(pdf_in)
-        meta = PdfSignatureMetadata(field_name="SecretarySignature")
-        out = sign_pdf(pdf_writer, meta, signer=signer)
+        # Step 4: Setup PdfSigner
+        pdf_stream = io.BytesIO(pdf_bytes)
+        writer = IncrementalPdfFileWriter(pdf_stream)
+        out = io.BytesIO()
+
+        pdf_signer = PdfSigner(
+            signature_meta=PdfSignatureMetadata(field_name="SecretarySignature"),
+            signer=signer,
+            new_field_spec=SigFieldSpec(sig_field_name="SecretarySignature")
+        )
+
+        pdf_signer.sign_pdf(writer, output=out)
 
         return Response(content=out.getvalue(), media_type="application/pdf")
 
