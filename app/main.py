@@ -6,6 +6,9 @@ from weasyprint import HTML
 from pyhanko.sign.signers import SimpleSigner
 from pyhanko.sign import sign_pdf
 from pyhanko.sign.fields import SigFieldSpec
+from cryptography.hazmat.primitives.serialization import load_pem_private_key
+from cryptography.hazmat.backends import default_backend
+from cryptography import x509
 import base64
 import io
 import logging
@@ -19,13 +22,14 @@ class SignPayload(BaseModel):
     base_url: str = ""
     certificate_pem: str
     private_key_pem: str
-    key_password: str = ""  # kept for future compatibility
+    key_password: str = ""  # optional, unused if key unencrypted
 
 app = FastAPI()
 
+# Allow all origins for testing; restrict later for production
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # ✅ later restrict in prod
+    allow_origins=["*"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -37,23 +41,31 @@ async def signed_pdf(body: SignPayload):
         # Generate unsigned PDF
         pdf_bytes = HTML(string=body.html, base_url=body.base_url).write_pdf()
 
-        # Decode certificate and key
+        # Decode cert and key
         cert_bytes = base64.b64decode(body.certificate_pem)
         key_bytes = base64.b64decode(body.private_key_pem)
 
-        # Load signer for pyHanko 0.17.2 (no passphrase argument)
-        signer = SimpleSigner.load(
-            key_bytes=key_bytes,
-            cert_bytes=cert_bytes
+        # Load cert & key manually
+        cert_obj = x509.load_pem_x509_certificate(cert_bytes, default_backend())
+        private_key_obj = load_pem_private_key(
+            key_bytes,
+            password=body.key_password.encode() if body.key_password else None,
+            backend=default_backend()
         )
 
+        signer = SimpleSigner(
+            signing_cert=cert_obj,
+            signing_key=private_key_obj,
+            cert_registry=None
+        )
+
+        # Sign the PDF
         pdf_stream = io.BytesIO(pdf_bytes)
         out = io.BytesIO()
 
-        # Sign the PDF
         sign_pdf(
-            pdf_in=pdf_stream,
             pdf_out=out,
+            pdf_in=pdf_stream,
             signer=signer,
             field_spec=SigFieldSpec(sig_field_name="SecretarySignature")
         )
