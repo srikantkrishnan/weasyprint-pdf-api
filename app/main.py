@@ -4,8 +4,9 @@ from pydantic import BaseModel
 from starlette.responses import Response
 from weasyprint import HTML
 from pyhanko.sign.signers import SimpleSigner
+from pyhanko.sign.general import PdfSigner, sign_pdf
 from pyhanko.sign.fields import SigFieldSpec
-from pyhanko.sign.general import sign_pdf
+from pyhanko.sign.general import SigningError
 from cryptography.hazmat.primitives.serialization import load_pem_private_key
 from cryptography.hazmat.backends import default_backend
 from cryptography import x509
@@ -27,7 +28,7 @@ app = FastAPI()
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # ⚠️ tighten later
+    allow_origins=["*"],  # tighten later in prod
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -57,17 +58,17 @@ async def signed_pdf(body: SignPayload):
             cert_registry=None
         )
 
-        # Step 4: Sign PDF
+        # Step 4: Use PdfSigner
         pdf_stream = io.BytesIO(pdf_bytes)
         out = io.BytesIO()
 
-        sign_pdf(
-            pdf_out=out,
-            pdf_in=pdf_stream,
+        pdf_signer = PdfSigner(
+            signature_meta=None,  # default metadata
             signer=signer,
-            existing_fields_only=False,   # ✅ create field if it doesn’t exist
-            field_spec=SigFieldSpec(sig_field_name="SecretarySignature")
+            new_field_spec=SigFieldSpec(sig_field_name="SecretarySignature")
         )
+
+        pdf_signer.sign_pdf(pdf_stream, out)
 
         return Response(content=out.getvalue(), media_type="application/pdf")
 
