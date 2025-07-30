@@ -5,7 +5,7 @@ from starlette.responses import Response
 from weasyprint import HTML
 from pyhanko.sign.signers import SimpleSigner
 from pyhanko.sign.fields import SigFieldSpec
-from pyhanko.sign import PdfSigner   # ✅ correct import for 0.20.0
+from pyhanko.sign.general import sign_pdf
 from cryptography.hazmat.primitives.serialization import load_pem_private_key
 from cryptography.hazmat.backends import default_backend
 from cryptography import x509
@@ -36,7 +36,7 @@ app.add_middleware(
 @app.post("/pdfs/signed")
 async def signed_pdf(body: SignPayload):
     try:
-        # Step 1: Generate PDF
+        # Step 1: Generate unsigned PDF
         pdf_bytes = HTML(string=body.html, base_url=body.base_url).write_pdf()
 
         # Step 2: Decode cert + key
@@ -61,8 +61,13 @@ async def signed_pdf(body: SignPayload):
         pdf_stream = io.BytesIO(pdf_bytes)
         out = io.BytesIO()
 
-        pdf_signer = PdfSigner(field_spec=SigFieldSpec(sig_field_name="SecretarySignature"))
-        pdf_signer.sign_pdf(pdf_stream, out, signer=signer)
+        sign_pdf(
+            pdf_out=out,
+            pdf_in=pdf_stream,
+            signer=signer,
+            existing_fields_only=False,   # ✅ create field if it doesn’t exist
+            field_spec=SigFieldSpec(sig_field_name="SecretarySignature")
+        )
 
         return Response(content=out.getvalue(), media_type="application/pdf")
 
