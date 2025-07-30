@@ -8,6 +8,11 @@ from pyhanko.sign import sign_pdf
 from pyhanko.sign.fields import SigFieldSpec
 import base64
 import io
+import logging
+import pyhanko
+
+# Log PyHanko version in Render logs
+logging.warning(f"🚀 Using PyHanko version: {pyhanko.__version__}")
 
 class SignPayload(BaseModel):
     html: str
@@ -37,12 +42,32 @@ async def signed_pdf(body: SignPayload):
         cert_bytes = base64.b64decode(body.certificate_pem)
         key_bytes = base64.b64decode(body.private_key_pem)
 
-        # Load signer using pyhanko 0.17.2 syntax
-        signer = SimpleSigner.load(
-            key_bytes=key_bytes,
-            cert_bytes=cert_bytes,
-            passphrase=body.key_password.encode() if body.key_password else None,
-        )
+        # Try with pyhanko<=0.17.2 syntax
+        try:
+            signer = SimpleSigner.load(
+                key_bytes=key_bytes,
+                cert_bytes=cert_bytes,
+                passphrase=body.key_password.encode() if body.key_password else None,
+            )
+            logging.warning("✅ Using SimpleSigner.load with key_bytes (pyhanko<=0.17.2)")
+        except TypeError:
+            logging.warning("⚠️ Falling back to cryptography-based signer (pyhanko>=0.18.0)")
+            from cryptography.hazmat.primitives.serialization import load_pem_private_key
+            from cryptography.hazmat.backends import default_backend
+            from cryptography import x509
+
+            private_key_obj = load_pem_private_key(
+                key_bytes,
+                password=body.key_password.encode() if body.key_password else None,
+                backend=default_backend()
+            )
+            cert_obj = x509.load_pem_x509_certificate(cert_bytes, default_backend())
+
+            signer = SimpleSigner(
+                signing_cert=cert_obj,
+                signing_key=private_key_obj,
+                cert_registry=None
+            )
 
         pdf_stream = io.BytesIO(pdf_bytes)
         out = io.BytesIO()
@@ -58,4 +83,5 @@ async def signed_pdf(body: SignPayload):
         return Response(content=out.getvalue(), media_type="application/pdf")
 
     except Exception as e:
+        logging.error(f"❌ Error generating signed PDF: {e}")
         raise HTTPException(status_code=500, detail=f"Error generating signed PDF: {e}")
