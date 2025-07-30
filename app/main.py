@@ -4,7 +4,7 @@ from pydantic import BaseModel
 from starlette.responses import Response
 from weasyprint import HTML
 from pyhanko.sign.signers import SimpleSigner
-from pyhanko.sign.general import sign_pdf
+from pyhanko.sign import sign_pdf
 from pyhanko.sign.fields import SigFieldSpec
 import base64
 import io
