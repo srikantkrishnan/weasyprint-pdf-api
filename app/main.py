@@ -5,7 +5,7 @@ from starlette.responses import Response
 from weasyprint import HTML
 from pyhanko.sign.signers import SimpleSigner
 from pyhanko.sign.fields import SigFieldSpec
-from pyhanko.sign.general import PdfSigner, PdfSignatureMetadata
+from pyhanko.sign.signers.pdf_signer import PdfSigner, PdfSignatureMetadata, sign_pdf
 from cryptography.hazmat.primitives.serialization import load_pem_private_key
 from cryptography.hazmat.backends import default_backend
 from cryptography import x509
@@ -51,7 +51,7 @@ async def signed_pdf(body: SignPayload):
         )
         cert_obj = x509.load_pem_x509_certificate(cert_bytes, default_backend())
 
-        # Step 3: Wrap cert in PyHanko's expected validator context
+        # Step 3: Wrap cert with validator (PyHanko >=0.18 requirement)
         vc = ValidationContext()
         validator = CertificateValidator(cert_obj, validation_context=vc)
         pyhanko_cert = validator.validate_usage(set())
@@ -62,7 +62,7 @@ async def signed_pdf(body: SignPayload):
             cert_registry=None
         )
 
-        # Step 4: Use PdfSigner
+        # Step 4: Sign using PdfSigner
         pdf_stream = io.BytesIO(pdf_bytes)
         out = io.BytesIO()
 
