@@ -9,7 +9,6 @@ from pyhanko.sign.signers.pdf_signer import PdfSigner, PdfSignatureMetadata
 from cryptography.hazmat.primitives.serialization import load_pem_private_key
 from cryptography.hazmat.backends import default_backend
 from cryptography import x509
-from pyhanko_certvalidator import ValidationContext
 import base64
 import io
 import logging
@@ -28,7 +27,6 @@ class SignPayload(BaseModel):
 
 app = FastAPI()
 
-# Allow all origins for testing; restrict later in production
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -54,14 +52,11 @@ async def signed_pdf(body: SignPayload):
         )
         cert_obj = x509.load_pem_x509_certificate(cert_bytes, default_backend())
 
-        logging.info("🔎 Step 3: Validating certificate using pyhanko-certvalidator")
-        vc = ValidationContext()
-        cert_path = vc._validate_cert_path(cert_obj)  # internal API: validates & returns chain
-
+        logging.info("✍️ Step 3: Creating SimpleSigner")
         signer = SimpleSigner(
-            signing_cert=cert_path.leaf_cert,
+            signing_cert=cert_obj,
             signing_key=private_key_obj,
-            cert_registry=cert_path.trust_anchor_store
+            cert_registry=None  # no chain validation yet
         )
 
         logging.info("✍️ Step 4: Signing PDF using PdfSigner")
