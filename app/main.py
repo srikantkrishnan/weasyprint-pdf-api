@@ -3,9 +3,10 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from starlette.responses import Response
 from weasyprint import HTML
-from pyhanko.sign.signers import SimpleSigner
+from pyhanko.sign import signers
+from pyhanko.pdf_utils.incremental_writer import IncrementalPdfFileWriter
 from pyhanko.sign.fields import SigFieldSpec
-from pyhanko.sign.general import PdfSigner
+from pyhanko.sign.general import PdfSignatureMetadata, sign_pdf
 from cryptography.hazmat.primitives.serialization import load_pem_private_key
 from cryptography.hazmat.backends import default_backend
 from cryptography import x509
@@ -14,7 +15,7 @@ import io
 import logging
 import pyhanko
 
-logging.warning(f"🚀 Using PyHanko version: {pyhanko.__version__}")
+logging.warning(f"🚀 PyHanko version: {pyhanko.__version__}")
 
 class SignPayload(BaseModel):
     html: str
@@ -36,39 +37,30 @@ app.add_middleware(
 @app.post("/pdfs/signed")
 async def signed_pdf(body: SignPayload):
     try:
-        # Step 1: Generate unsigned PDF
+        # generate unsigned PDF
         pdf_bytes = HTML(string=body.html, base_url=body.base_url).write_pdf()
 
-        # Step 2: Decode certificate and private key
         cert_bytes = base64.b64decode(body.certificate_pem)
         key_bytes = base64.b64decode(body.private_key_pem)
 
-        private_key_obj = load_pem_private_key(
-            key_bytes,
-            password=body.key_password.encode() if body.key_password else None,
+        private_key = load_pem_private_key(
+            key_bytes, password=None if not body.key_password else body.key_password.encode(),
             backend=default_backend()
         )
-        cert_obj = x509.load_pem_x509_certificate(cert_bytes, default_backend())
+        cert = x509.load_pem_x509_certificate(cert_bytes, default_backend())
 
-        signer = SimpleSigner(
-            signing_cert=cert_obj,
-            signing_key=private_key_obj,
+        signer = signers.SimpleSigner(
+            signing_cert=cert,
+            signing_key=private_key,
             cert_registry=None
         )
 
-        # Step 3: Set up PdfSigner
-        pdf_signer = PdfSigner(
-            signer=signer,
-            new_field_spec=SigFieldSpec(sig_field_name="SecretarySignature")
-        )
-
-        # Step 4: Sign the PDF
-        pdf_stream = io.BytesIO(pdf_bytes)
-        out = io.BytesIO()
-        pdf_signer.sign_pdf(pdf_stream, out)
+        w = IncrementalPdfFileWriter(io.BytesIO(pdf_bytes))
+        meta = PdfSignatureMetadata(field_name="SecretarySignature")
+        out = sign_pdf(w, meta, signer=signer)
 
         return Response(content=out.getvalue(), media_type="application/pdf")
 
     except Exception as e:
-        logging.error(f"❌ Error generating signed PDF: {e}")
-        raise HTTPException(status_code=500, detail=f"Error generating signed PDF: {e}")
+        logging.error(f"❌ Error signing PDF: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
