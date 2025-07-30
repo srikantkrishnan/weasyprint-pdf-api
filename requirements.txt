@@ -1,7 +1,23 @@
+fastapi==0.111.0
+uvicorn[standard]==0.30.1
+
+# PDF generation
 weasyprint==66.0
-fastapi==0.103.1
-uvicorn[standard]==0.23.2
-pydyf==0.8.0
-pyhanko==0.29.1
-pyhanko-certvalidator>=0.20.0
+pydyf==0.11.0
+tinyhtml5==2.0.0
+
+# Digital signing
+pyHanko==0.29.1
+pyhanko-certvalidator==0.27.0
+
+# Cryptography and ASN.1 handling
 cryptography>=42.0.0
+asn1crypto>=1.5.1
+
+# XML & parsing (WeasyPrint + pyHanko dependency)
+lxml==6.0.0
+
+# Utilities
+requests>=2.32.0
+tzlocal>=5.2
+pyyaml>=6.0.1
