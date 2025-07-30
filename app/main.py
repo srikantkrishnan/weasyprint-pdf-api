@@ -3,8 +3,9 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from starlette.responses import Response
 from weasyprint import HTML
-from pyhanko.sign.signers import SimpleSigner, PdfSigner, PdfSignatureMetadata
+from pyhanko.sign.signers import SimpleSigner
 from pyhanko.sign.fields import SigFieldSpec
+from pyhanko.sign.general import PdfSigner, PdfSignatureMetadata
 from cryptography.hazmat.primitives.serialization import load_pem_private_key
 from cryptography.hazmat.backends import default_backend
 from cryptography import x509
@@ -12,7 +13,7 @@ import base64
 import io
 import logging
 import pyhanko
-import traceback
+from pyhanko_certvalidator import CertificateValidator, ValidationContext
 
 logging.warning(f"🚀 Using PyHanko version: {pyhanko.__version__}")
 
@@ -27,7 +28,7 @@ app = FastAPI()
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # tighten later for prod
+    allow_origins=["*"],  # tighten later in prod
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -50,14 +51,18 @@ async def signed_pdf(body: SignPayload):
         )
         cert_obj = x509.load_pem_x509_certificate(cert_bytes, default_backend())
 
-        # Step 3: Setup signer
+        # Step 3: Wrap cert in PyHanko's expected validator context
+        vc = ValidationContext()
+        validator = CertificateValidator(cert_obj, validation_context=vc)
+        pyhanko_cert = validator.validate_usage(set())
+
         signer = SimpleSigner(
-            signing_cert=cert_obj,
+            signing_cert=pyhanko_cert,
             signing_key=private_key_obj,
             cert_registry=None
         )
 
-        # Step 4: Setup PdfSigner
+        # Step 4: Use PdfSigner
         pdf_stream = io.BytesIO(pdf_bytes)
         out = io.BytesIO()
 
@@ -72,6 +77,5 @@ async def signed_pdf(body: SignPayload):
         return Response(content=out.getvalue(), media_type="application/pdf")
 
     except Exception as e:
-        logging.error("❌ Error generating signed PDF:")
-        logging.error(traceback.format_exc())
+        logging.exception("❌ Error generating signed PDF:")
         raise HTTPException(status_code=500, detail=f"Error generating signed PDF: {e}")
