@@ -12,6 +12,7 @@ from cryptography import x509
 import base64
 import io
 import logging
+import traceback
 import pyhanko
 
 logging.warning(f"🚀 Using PyHanko version: {pyhanko.__version__}")
@@ -64,7 +65,7 @@ async def signed_pdf(body: SignPayload):
         pdf_stream = io.BytesIO(pdf_bytes)
         out = io.BytesIO()
 
-        # Use sign_pdf
+        # Use sign_pdf with pyHanko >=0.18 API
         sign_pdf(
             pdf_out=out,
             pdf_reader=pdf_stream,
@@ -75,5 +76,6 @@ async def signed_pdf(body: SignPayload):
         return Response(content=out.getvalue(), media_type="application/pdf")
 
     except Exception as e:
-        logging.error(f"❌ Error generating signed PDF: {e}")
+        tb = traceback.format_exc()
+        logging.error(f"❌ Full error generating signed PDF:\n{tb}")
         raise HTTPException(status_code=500, detail=f"Error generating signed PDF: {e}")
