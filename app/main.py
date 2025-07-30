@@ -5,7 +5,7 @@ from starlette.responses import Response
 from weasyprint import HTML
 from pyhanko.sign.signers import SimpleSigner
 from pyhanko.sign.fields import SigFieldSpec
-from pyhanko.sign.signers.pdf_signer import PdfSigner, PdfSignatureMetadata, sign_pdf
+from pyhanko.sign.signers.pdf_signer import PdfSigner, PdfSignatureMetadata
 from cryptography.hazmat.primitives.serialization import load_pem_private_key
 from cryptography.hazmat.backends import default_backend
 from cryptography import x509
@@ -13,7 +13,9 @@ import base64
 import io
 import logging
 import pyhanko
-from pyhanko_certvalidator import CertificateValidator, ValidationContext
+import traceback
+from fastapi.responses import JSONResponse
+from typing import Dict
 
 logging.warning(f"🚀 Using PyHanko version: {pyhanko.__version__}")
 
@@ -24,7 +26,15 @@ class SignPayload(BaseModel):
     private_key_pem: str
     key_password: str = ""
 
-app = FastAPI()
+class ErrorDetail(BaseModel):
+    error: str
+    traceback: str
+
+app = FastAPI(
+    title="WeasyPrint PDF Signing API",
+    description="Generate and sign PDFs using WeasyPrint + PyHanko",
+    version="1.0.0"
+)
 
 app.add_middleware(
     CORSMiddleware,
@@ -34,8 +44,29 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-@app.post("/pdfs/signed")
+@app.post(
+    "/pdfs/signed",
+    responses={
+        200: {
+            "content": {"application/pdf": {"schema": {"type": "string", "format": "binary"}}},
+            "description": "Successfully generated and signed PDF. Swagger will show a download button."
+        },
+        500: {
+            "model": ErrorDetail,
+            "description": "Error occurred while generating the signed PDF."
+        }
+    }
+)
 async def signed_pdf(body: SignPayload):
+    """
+    Generate a signed PDF from HTML content using the provided certificate and private key.
+    
+    - **html**: HTML content for the PDF.
+    - **base_url**: Base URL for resolving assets (CSS, images).
+    - **certificate_pem**: Base64-encoded PEM certificate.
+    - **private_key_pem**: Base64-encoded PEM private key.
+    - **key_password**: Optional password for the private key.
+    """
     try:
         # Step 1: Generate unsigned PDF
         pdf_bytes = HTML(string=body.html, base_url=body.base_url).write_pdf()
@@ -51,18 +82,14 @@ async def signed_pdf(body: SignPayload):
         )
         cert_obj = x509.load_pem_x509_certificate(cert_bytes, default_backend())
 
-        # Step 3: Wrap cert with validator (PyHanko >=0.18 requirement)
-        vc = ValidationContext()
-        validator = CertificateValidator(cert_obj, validation_context=vc)
-        pyhanko_cert = validator.validate_usage(set())
-
+        # Step 3: Create signer
         signer = SimpleSigner(
-            signing_cert=pyhanko_cert,
+            signing_cert=cert_obj,
             signing_key=private_key_obj,
             cert_registry=None
         )
 
-        # Step 4: Sign using PdfSigner
+        # Step 4: Sign PDF
         pdf_stream = io.BytesIO(pdf_bytes)
         out = io.BytesIO()
 
@@ -74,8 +101,20 @@ async def signed_pdf(body: SignPayload):
 
         pdf_signer.sign_pdf(pdf_stream, out)
 
-        return Response(content=out.getvalue(), media_type="application/pdf")
+        # Return signed PDF with download hint
+        return Response(
+            content=out.getvalue(),
+            media_type="application/pdf",
+            headers={"Content-Disposition": "attachment; filename=signed_document.pdf"}
+        )
 
     except Exception as e:
-        logging.exception("❌ Error generating signed PDF:")
-        raise HTTPException(status_code=500, detail=f"Error generating signed PDF: {e}")
+        error_trace = traceback.format_exc()
+        logging.error(f"❌ Error generating signed PDF:\n{error_trace}")
+        return JSONResponse(
+            status_code=500,
+            content={
+                "error": str(e),
+                "traceback": error_trace
+            }
+        )
