@@ -6,9 +6,7 @@ from weasyprint import HTML
 
 from pyhanko.sign.signers import SimpleSigner
 from pyhanko.sign.fields import SigFieldSpec
-from pyhanko.sign.general import sign_pdf
-from pyhanko.sign.validation.settings import KeyUsageConstraints
-from pyhanko.sign.signers.pdf_signer import PdfSignatureMetadata
+from pyhanko.sign.signers.pdf_signer import PdfSigner, PdfSignatureMetadata
 
 from cryptography.hazmat.primitives.serialization import load_pem_private_key
 from cryptography.hazmat.backends import default_backend
@@ -62,17 +60,17 @@ async def signed_pdf(body: SignPayload):
             cert_registry=None
         )
 
-        # Step 4: Prepare PDF signing
+        # Step 4: Use PdfSigner in pyHanko >=0.18
         pdf_stream = io.BytesIO(pdf_bytes)
         out = io.BytesIO()
 
-        sign_pdf(
-            pdf_out=out,
-            pdf_in=pdf_stream,
-            signer=signer,
+        pdf_signer = PdfSigner(
             signature_meta=PdfSignatureMetadata(field_name="SecretarySignature"),
+            signer=signer,
             new_field_spec=SigFieldSpec(sig_field_name="SecretarySignature")
         )
+
+        pdf_signer.sign_pdf(pdf_stream, out)
 
         return Response(content=out.getvalue(), media_type="application/pdf")
 
