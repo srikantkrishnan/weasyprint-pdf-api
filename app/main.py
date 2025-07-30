@@ -1,13 +1,15 @@
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
-from weasyprint import HTML
 from starlette.responses import Response
-from pyhanko.sign import signers
+from weasyprint import HTML
+from pyhanko.sign.signers import SimpleSigner
+from pyhanko.sign.general import sign_pdf
+from pyhanko.sign.fields import SigFieldSpec
 import base64
 import io
 
-class SignedPDFPayload(BaseModel):
+class SignPayload(BaseModel):
     html: str
     base_url: str = ""
     certificate_pem: str
@@ -16,6 +18,7 @@ class SignedPDFPayload(BaseModel):
 
 app = FastAPI()
 
+# Allow all origins for testing; restrict later for production
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -25,39 +28,34 @@ app.add_middleware(
 )
 
 @app.post("/pdfs/signed")
-async def print_signed_pdf(body: SignedPDFPayload):
+async def signed_pdf(body: SignPayload):
     try:
-        # Generate PDF from HTML
+        # Generate unsigned PDF
         pdf_bytes = HTML(string=body.html, base_url=body.base_url).write_pdf()
 
-        # Decode Base64 certificate & key
+        # Decode certificate and key
         cert_bytes = base64.b64decode(body.certificate_pem)
         key_bytes = base64.b64decode(body.private_key_pem)
-        password = body.key_password.encode() if body.key_password else None
 
-        # Correct param: key_passphrase instead of passphrase
-        signer = signers.SimpleSigner.load(
-            cert_bytes,
-            key_bytes,
-            key_passphrase=password
+        # Load signer using pyhanko 0.17.2 syntax
+        signer = SimpleSigner.load(
+            key_bytes=key_bytes,
+            cert_bytes=cert_bytes,
+            passphrase=body.key_password.encode() if body.key_password else None,
         )
+
+        pdf_stream = io.BytesIO(pdf_bytes)
+        out = io.BytesIO()
 
         # Sign the PDF
-        pdf_out = io.BytesIO()
-        pdf_out.write(
-            signers.sign_pdf(
-                io.BytesIO(pdf_bytes),
-                signer=signer,
-                sign_kwargs={"reason": "Approved Board Minutes"}
-            )
+        sign_pdf(
+            pdf_out=out,
+            pdf_in=pdf_stream,
+            signer=signer,
+            field_spec=SigFieldSpec(sig_field_name="SecretarySignature")
         )
-        pdf_out.seek(0)
 
-        return Response(
-            content=pdf_out.read(),
-            media_type="application/pdf",
-            headers={"Content-Disposition": "attachment; filename=signed_minutes.pdf"}
-        )
+        return Response(content=out.getvalue(), media_type="application/pdf")
 
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error generating signed PDF: {e}")
