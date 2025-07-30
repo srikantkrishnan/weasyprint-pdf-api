@@ -1,97 +1,113 @@
-from fastapi import FastAPI, HTTPException
-from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel
-from starlette.responses import Response
-from weasyprint import HTML
-from pyhanko.sign.signers import SimpleSigner
-from pyhanko.sign.fields import SigFieldSpec
-from pyhanko.sign.signers.pdf_signer import PdfSigner, PdfSignatureMetadata
-from cryptography.hazmat.primitives.serialization import load_pem_private_key
-from cryptography.hazmat.backends import default_backend
-from cryptography import x509
-import base64
 import io
 import logging
-import traceback
-import pyhanko
+import tempfile
+import subprocess
+import base64
+from fastapi import FastAPI, UploadFile, File
+from fastapi.responses import StreamingResponse
+from weasyprint import HTML
+from pyhanko.sign.signers import SimpleSigner, PdfSigner
+from pyhanko.sign.general import PdfSignatureMetadata
+from pyhanko_certvalidator.context import ValidationContext
+from cryptography.hazmat.primitives import serialization, hashes
+from cryptography.hazmat.backends import default_backend
+from cryptography import x509
 
-# ----------------------------------------------------------
-# Logging configuration
-# ----------------------------------------------------------
 logging.basicConfig(level=logging.INFO)
-logging.warning(f"🚀 Using PyHanko version: {pyhanko.__version__}")
+logger = logging.getLogger(__name__)
 
-# ----------------------------------------------------------
-# Pydantic model for request body
-# ----------------------------------------------------------
-class SignPayload(BaseModel):
-    html: str
-    base_url: str = ""
-    certificate_pem: str
-    private_key_pem: str
-    key_password: str = ""
-
-# ----------------------------------------------------------
-# FastAPI app initialization
-# ----------------------------------------------------------
 app = FastAPI()
 
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
-
-# ----------------------------------------------------------
-# Signed PDF Endpoint
-# ----------------------------------------------------------
-@app.post("/pdfs/signed")
-async def signed_pdf(body: SignPayload):
+def normalize_private_key(key_bytes: bytes) -> bytes:
+    """
+    Detects if the private key is PKCS#1 and converts it into PKCS#8.
+    Returns a PKCS#8-compliant key for use in PyHanko.
+    """
     try:
-        logging.info("📄 Step 1: Generating unsigned PDF from HTML")
-        pdf_bytes = HTML(string=body.html, base_url=body.base_url).write_pdf()
+        logger.info("🔑 Trying to load private key as PKCS#8...")
+        serialization.load_pem_private_key(key_bytes, password=None, backend=default_backend())
+        logger.info("✅ Key is already PKCS#8")
+        return key_bytes
+    except ValueError:
+        logger.info("⚠️ Key is not PKCS#8, attempting conversion from PKCS#1 → PKCS#8...")
+        with tempfile.NamedTemporaryFile(delete=False) as tmp_in, tempfile.NamedTemporaryFile(delete=False) as tmp_out:
+            tmp_in.write(key_bytes)
+            tmp_in.flush()
+            cmd = [
+                "openssl", "pkcs8", "-topk8", "-inform", "PEM", "-outform", "PEM",
+                "-in", tmp_in.name, "-out", tmp_out.name, "-nocrypt"
+            ]
+            subprocess.run(cmd, check=True)
+            with open(tmp_out.name, "rb") as f:
+                converted_key = f.read()
+            logger.info("✅ Conversion to PKCS#8 successful")
+            return converted_key
 
-        logging.info("🔑 Step 2: Decoding certificate and private key")
-        cert_bytes = base64.b64decode(body.certificate_pem)
-        key_bytes = base64.b64decode(body.private_key_pem)
+def verify_cert_key_pair(cert: x509.Certificate, private_key) -> bool:
+    """
+    Verifies that the certificate and private key match.
+    """
+    try:
+        cert_pub = cert.public_key().public_numbers()
+        priv_pub = private_key.public_key().public_numbers()
+        match = cert_pub.n == priv_pub.n and cert_pub.e == priv_pub.e
+        if match:
+            logger.info("✅ Certificate and private key match")
+        else:
+            logger.error("❌ Certificate and private key DO NOT match")
+        return match
+    except Exception as e:
+        logger.error(f"⚠️ Error verifying cert/key pair: {e}")
+        return False
 
-        private_key_obj = load_pem_private_key(
-            key_bytes,
-            password=body.key_password.encode() if body.key_password else None,
-            backend=default_backend()
+@app.post("/pdfs/signed")
+async def signed_pdf(
+    html_file: UploadFile = File(...),
+    cert_file: UploadFile = File(...),
+    key_file: UploadFile = File(...),
+):
+    try:
+        logger.info("📄 Step 1: Generating unsigned PDF from HTML")
+        html_bytes = await html_file.read()
+        pdf_bytes = HTML(string=html_bytes.decode("utf-8")).write_pdf()
+
+        logger.info("🔑 Step 2: Decoding certificate and private key")
+        cert_bytes = await cert_file.read()
+        key_bytes = await key_file.read()
+
+        cert = x509.load_pem_x509_certificate(cert_bytes, default_backend())
+        key_bytes = normalize_private_key(key_bytes)
+        private_key = serialization.load_pem_private_key(
+            key_bytes, password=None, backend=default_backend()
         )
 
-        # ✅ Load certificate directly from PEM (fix for FileNotFoundError)
-        cert_obj = x509.load_pem_x509_certificate(cert_bytes, default_backend())
+        # 🔍 Verify cert/key pair before signing
+        verify_cert_key_pair(cert, private_key)
 
-        logging.info("✍️ Step 3: Creating SimpleSigner")
+        logger.info("✍️ Step 3: Creating SimpleSigner")
         signer = SimpleSigner(
-            signing_cert=cert_obj,
-            signing_key=private_key_obj,
-            cert_registry=None  # no chain validation yet
+            signing_cert=cert,
+            signing_key=private_key,
+            cert_registry=None,
+            embed_roots=True,
         )
 
-        logging.info("✍️ Step 4: Signing PDF using PdfSigner")
-        pdf_stream = io.BytesIO(pdf_bytes)
-        out = io.BytesIO()
-
-        pdf_signer = PdfSigner(
-            signature_meta=PdfSignatureMetadata(field_name="SecretarySignature"),
-            signer=signer,
-            new_field_spec=SigFieldSpec(sig_field_name="SecretarySignature")
+        logger.info("✍️ Step 4: Signing PDF using PdfSigner")
+        meta = PdfSignatureMetadata(
+            field_name="Signature1",
+            md_algorithm="sha256",  # Force RSA+SHA256
         )
+        vc = ValidationContext(allow_fetching=True)
 
-        pdf_signer.sign_pdf(pdf_stream, out)
+        input_pdf = io.BytesIO(pdf_bytes)
+        output_pdf = io.BytesIO()
+        pdf_signer = PdfSigner(meta, signer=signer, validation_context=vc)
+        pdf_signer.sign_pdf(input_pdf, output_pdf)
 
-        logging.info("✅ Successfully signed PDF")
-        return Response(content=out.getvalue(), media_type="application/pdf")
+        logger.info("✅ PDF signing successful")
+        output_pdf.seek(0)
+        return StreamingResponse(output_pdf, media_type="application/pdf")
 
     except Exception as e:
-        tb_str = traceback.format_exc()
-        logging.error("❌ Error generating signed PDF:\n" + tb_str)
-        raise HTTPException(status_code=500, detail={
-            "error": str(e),
-            "traceback": tb_str
-        })
+        logger.error(f"❌ Error generating signed PDF:\n{e}", exc_info=True)
+        return {"detail": {"error": str(e)}}
