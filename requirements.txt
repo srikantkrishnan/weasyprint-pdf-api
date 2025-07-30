@@ -5,4 +5,3 @@ pydyf==0.8.0
 pyhanko==0.29.1
 pyhanko-certvalidator>=0.20.0
 cryptography>=42.0.0
-lxml>=6.0.0
