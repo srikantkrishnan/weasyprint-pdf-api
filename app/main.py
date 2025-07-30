@@ -52,7 +52,7 @@ async def signed_pdf(body: SignPayload):
         )
 
         # ✅ FIX: use pyhanko loader instead of cryptography.x509
-        cert_obj = load_cert_from_pemder(cert_bytes)
+        cert_obj = load_cert_from_pemder(io.BytesIO(cert_bytes))
 
         logging.info("✍️ Step 3: Creating SimpleSigner")
         signer = SimpleSigner(
