@@ -3,9 +3,9 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from starlette.responses import Response
 from weasyprint import HTML
-from pyhanko.sign.signers import SimpleSigner
-from pyhanko.sign import sign_pdf
+from pyhanko.sign.signers import SimpleSigner, PdfSigner
 from pyhanko.sign.fields import SigFieldSpec
+from pyhanko.sign.general import sign_pdf
 from cryptography.hazmat.primitives.serialization import load_pem_private_key
 from cryptography.hazmat.backends import default_backend
 from cryptography import x509
@@ -57,12 +57,12 @@ async def signed_pdf(body: SignPayload):
         pdf_stream = io.BytesIO(pdf_bytes)
         out = io.BytesIO()
 
-        # New pyHanko API (>=0.20.0)
-        sign_pdf(
-            pdf_in=pdf_stream,
+        # Use PdfSigner instead of old sign_pdf()
+        pdf_signer = PdfSigner(field_spec=SigFieldSpec(sig_field_name="SecretarySignature"))
+        pdf_signer.sign_pdf(
             pdf_out=out,
-            signer=signer,
-            field_spec=SigFieldSpec(sig_field_name="SecretarySignature")
+            pdf_in=pdf_stream,
+            signer=signer
         )
 
         return Response(content=out.getvalue(), media_type="application/pdf")
