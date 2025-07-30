@@ -3,15 +3,12 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from starlette.responses import Response
 from weasyprint import HTML
-
 from pyhanko.sign.signers import SimpleSigner
 from pyhanko.sign.fields import SigFieldSpec
-from pyhanko.sign.signers.pdf_signer import PdfSigner, PdfSignatureMetadata
-
+from pyhanko.sign.general import sign_pdf
 from cryptography.hazmat.primitives.serialization import load_pem_private_key
 from cryptography.hazmat.backends import default_backend
 from cryptography import x509
-
 import base64
 import io
 import logging
@@ -46,6 +43,7 @@ async def signed_pdf(body: SignPayload):
         cert_bytes = base64.b64decode(body.certificate_pem)
         key_bytes = base64.b64decode(body.private_key_pem)
 
+        # Load private key and cert
         private_key_obj = load_pem_private_key(
             key_bytes,
             password=body.key_password.encode() if body.key_password else None,
@@ -53,24 +51,26 @@ async def signed_pdf(body: SignPayload):
         )
         cert_obj = x509.load_pem_x509_certificate(cert_bytes, default_backend())
 
-        # Step 3: Setup signer
+        logging.warning(f"🔑 Loaded private key type: {type(private_key_obj)}")
+        logging.warning(f"📜 Loaded cert subject: {cert_obj.subject}")
+
+        # Build signer
         signer = SimpleSigner(
             signing_cert=cert_obj,
             signing_key=private_key_obj,
             cert_registry=None
         )
 
-        # Step 4: Use PdfSigner in pyHanko >=0.18
         pdf_stream = io.BytesIO(pdf_bytes)
         out = io.BytesIO()
 
-        pdf_signer = PdfSigner(
-            signature_meta=PdfSignatureMetadata(field_name="SecretarySignature"),
+        # Use sign_pdf
+        sign_pdf(
+            pdf_out=out,
+            pdf_reader=pdf_stream,
             signer=signer,
-            new_field_spec=SigFieldSpec(sig_field_name="SecretarySignature")
+            field_spec=SigFieldSpec(sig_field_name="SecretarySignature")
         )
-
-        pdf_signer.sign_pdf(pdf_stream, out)
 
         return Response(content=out.getvalue(), media_type="application/pdf")
 
