@@ -11,7 +11,7 @@ import io
 import logging
 import pyhanko
 
-# Log PyHanko version in Render logs
+# Log PyHanko version
 logging.warning(f"🚀 Using PyHanko version: {pyhanko.__version__}")
 
 class SignPayload(BaseModel):
@@ -23,7 +23,7 @@ class SignPayload(BaseModel):
 
 app = FastAPI()
 
-# Allow all origins for testing; restrict later for production
+# CORS setup
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -38,22 +38,25 @@ async def signed_pdf(body: SignPayload):
         # Generate unsigned PDF
         pdf_bytes = HTML(string=body.html, base_url=body.base_url).write_pdf()
 
-        # Decode certificate and key
+        # Decode cert and key into file-like objects
         cert_bytes = base64.b64decode(body.certificate_pem)
         key_bytes = base64.b64decode(body.private_key_pem)
 
-        # Always use PyHanko 0.17.2 API
+        cert_file = io.BytesIO(cert_bytes)
+        key_file = io.BytesIO(key_bytes)
+
+        # PyHanko 0.17.2 expects file-like objects, not raw bytes
         signer = SimpleSigner.load(
-            key_bytes=key_bytes,
-            cert_bytes=cert_bytes,
+            key_file=key_file,
+            cert_file=cert_file,
             passphrase=body.key_password.encode() if body.key_password else None,
         )
-        logging.warning("✅ Using SimpleSigner.load with key_bytes (pyhanko==0.17.2)")
+        logging.warning("✅ Using SimpleSigner.load with key_file and cert_file (pyhanko==0.17.2)")
 
+        # Sign the PDF
         pdf_stream = io.BytesIO(pdf_bytes)
         out = io.BytesIO()
 
-        # Sign the PDF
         sign_pdf(
             pdf_out=out,
             pdf_in=pdf_stream,
