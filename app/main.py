@@ -6,9 +6,9 @@ from weasyprint import HTML
 from pyhanko.sign.signers import SimpleSigner
 from pyhanko.sign.fields import SigFieldSpec
 from pyhanko.sign.signers.pdf_signer import PdfSigner, PdfSignatureMetadata
+from pyhanko.sign.general import load_cert_from_pemder  # ✅ NEW import
 from cryptography.hazmat.primitives.serialization import load_pem_private_key
 from cryptography.hazmat.backends import default_backend
-from cryptography import x509
 import base64
 import io
 import logging
@@ -50,13 +50,15 @@ async def signed_pdf(body: SignPayload):
             password=body.key_password.encode() if body.key_password else None,
             backend=default_backend()
         )
-        cert_obj = x509.load_pem_x509_certificate(cert_bytes, default_backend())
+
+        # ✅ FIX: use pyhanko loader instead of cryptography.x509
+        cert_obj = load_cert_from_pemder(cert_bytes)
 
         logging.info("✍️ Step 3: Creating SimpleSigner")
         signer = SimpleSigner(
             signing_cert=cert_obj,
             signing_key=private_key_obj,
-            cert_registry=None  # no chain validation yet
+            cert_registry=None  # skip chain validation for now
         )
 
         logging.info("✍️ Step 4: Signing PDF using PdfSigner")
