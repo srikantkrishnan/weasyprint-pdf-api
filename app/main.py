@@ -3,13 +3,17 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from starlette.responses import Response
 from weasyprint import HTML
+
 from pyhanko.sign.signers import SimpleSigner
 from pyhanko.sign.fields import SigFieldSpec
-from pyhanko.sign.general import PdfSigner, PdfSignatureMetadata
+from pyhanko.sign.general import sign_pdf
+from pyhanko.sign.validation.settings import KeyUsageConstraints
+from pyhanko.sign.signers.pdf_signer import PdfSignatureMetadata
+
 from cryptography.hazmat.primitives.serialization import load_pem_private_key
 from cryptography.hazmat.backends import default_backend
 from cryptography import x509
-from pyhanko.pdf_utils.incremental_writer import IncrementalPdfFileWriter
+
 import base64
 import io
 import logging
@@ -58,18 +62,17 @@ async def signed_pdf(body: SignPayload):
             cert_registry=None
         )
 
-        # Step 4: Setup PdfSigner
+        # Step 4: Prepare PDF signing
         pdf_stream = io.BytesIO(pdf_bytes)
-        writer = IncrementalPdfFileWriter(pdf_stream)
         out = io.BytesIO()
 
-        pdf_signer = PdfSigner(
-            signature_meta=PdfSignatureMetadata(field_name="SecretarySignature"),
+        sign_pdf(
+            pdf_out=out,
+            pdf_in=pdf_stream,
             signer=signer,
+            signature_meta=PdfSignatureMetadata(field_name="SecretarySignature"),
             new_field_spec=SigFieldSpec(sig_field_name="SecretarySignature")
         )
-
-        pdf_signer.sign_pdf(writer, output=out)
 
         return Response(content=out.getvalue(), media_type="application/pdf")
 
