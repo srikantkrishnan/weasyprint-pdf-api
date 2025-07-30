@@ -6,18 +6,24 @@ from weasyprint import HTML
 from pyhanko.sign.signers import SimpleSigner
 from pyhanko.sign.fields import SigFieldSpec
 from pyhanko.sign.signers.pdf_signer import PdfSigner, PdfSignatureMetadata
-from pyhanko.sign.general import load_cert_from_pemder  # ✅ NEW import
 from cryptography.hazmat.primitives.serialization import load_pem_private_key
 from cryptography.hazmat.backends import default_backend
+from cryptography import x509
 import base64
 import io
 import logging
 import traceback
 import pyhanko
 
+# ----------------------------------------------------------
+# Logging configuration
+# ----------------------------------------------------------
 logging.basicConfig(level=logging.INFO)
 logging.warning(f"🚀 Using PyHanko version: {pyhanko.__version__}")
 
+# ----------------------------------------------------------
+# Pydantic model for request body
+# ----------------------------------------------------------
 class SignPayload(BaseModel):
     html: str
     base_url: str = ""
@@ -25,6 +31,9 @@ class SignPayload(BaseModel):
     private_key_pem: str
     key_password: str = ""
 
+# ----------------------------------------------------------
+# FastAPI app initialization
+# ----------------------------------------------------------
 app = FastAPI()
 
 app.add_middleware(
@@ -35,6 +44,9 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+# ----------------------------------------------------------
+# Signed PDF Endpoint
+# ----------------------------------------------------------
 @app.post("/pdfs/signed")
 async def signed_pdf(body: SignPayload):
     try:
@@ -51,14 +63,14 @@ async def signed_pdf(body: SignPayload):
             backend=default_backend()
         )
 
-        # ✅ FIX: use pyhanko loader instead of cryptography.x509
-        cert_obj = load_cert_from_pemder(io.BytesIO(cert_bytes))
+        # ✅ Load certificate directly from PEM (fix for FileNotFoundError)
+        cert_obj = x509.load_pem_x509_certificate(cert_bytes, default_backend())
 
         logging.info("✍️ Step 3: Creating SimpleSigner")
         signer = SimpleSigner(
             signing_cert=cert_obj,
             signing_key=private_key_obj,
-            cert_registry=None  # skip chain validation for now
+            cert_registry=None  # no chain validation yet
         )
 
         logging.info("✍️ Step 4: Signing PDF using PdfSigner")
