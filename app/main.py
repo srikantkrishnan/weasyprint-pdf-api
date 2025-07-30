@@ -4,9 +4,8 @@ from pydantic import BaseModel
 from starlette.responses import Response
 from weasyprint import HTML
 from pyhanko.sign.signers import SimpleSigner
-from pyhanko.sign.general import PdfSigner, sign_pdf
 from pyhanko.sign.fields import SigFieldSpec
-from pyhanko.sign.general import SigningError
+from pyhanko.sign.general import PdfSigner
 from cryptography.hazmat.primitives.serialization import load_pem_private_key
 from cryptography.hazmat.backends import default_backend
 from cryptography import x509
@@ -28,7 +27,7 @@ app = FastAPI()
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # tighten later in prod
+    allow_origins=["*"],  # tighten later
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -40,7 +39,7 @@ async def signed_pdf(body: SignPayload):
         # Step 1: Generate unsigned PDF
         pdf_bytes = HTML(string=body.html, base_url=body.base_url).write_pdf()
 
-        # Step 2: Decode cert + key
+        # Step 2: Decode certificate and private key
         cert_bytes = base64.b64decode(body.certificate_pem)
         key_bytes = base64.b64decode(body.private_key_pem)
 
@@ -51,23 +50,21 @@ async def signed_pdf(body: SignPayload):
         )
         cert_obj = x509.load_pem_x509_certificate(cert_bytes, default_backend())
 
-        # Step 3: Setup signer
         signer = SimpleSigner(
             signing_cert=cert_obj,
             signing_key=private_key_obj,
             cert_registry=None
         )
 
-        # Step 4: Use PdfSigner
-        pdf_stream = io.BytesIO(pdf_bytes)
-        out = io.BytesIO()
-
+        # Step 3: Set up PdfSigner
         pdf_signer = PdfSigner(
-            signature_meta=None,  # default metadata
             signer=signer,
             new_field_spec=SigFieldSpec(sig_field_name="SecretarySignature")
         )
 
+        # Step 4: Sign the PDF
+        pdf_stream = io.BytesIO(pdf_bytes)
+        out = io.BytesIO()
         pdf_signer.sign_pdf(pdf_stream, out)
 
         return Response(content=out.getvalue(), media_type="application/pdf")
