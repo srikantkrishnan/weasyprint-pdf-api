@@ -20,7 +20,6 @@ logger = logging.getLogger(__name__)
 
 app = FastAPI(title="WeasyPrint Signing API")
 
-# Temporary folder for certs
 CERT_DIR = tempfile.mkdtemp(prefix="certs_")
 CA_CERT_FILE = os.path.join(CERT_DIR, "ca.pem")
 CA_KEY_FILE = os.path.join(CERT_DIR, "ca.key")
@@ -29,11 +28,11 @@ LEAF_KEY_FILE = os.path.join(CERT_DIR, "leaf.key")
 
 CA_VALIDITY_DAYS = 3650  # 10 years
 LEAF_VALIDITY_DAYS = 365  # 1 year
-RENEW_THRESHOLD_DAYS = 7  # renew if expiring within next 7 days
+RENEW_THRESHOLD_DAYS = 7  # renew if expiring soon
 
 
 def generate_ca_and_leaf():
-    # Generate Root CA
+    """Generate a root CA and leaf certificate, then save them to files."""
     ca_key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
     ca_subject = x509.Name([
         x509.NameAttribute(x509.NameOID.COUNTRY_NAME, "IN"),
@@ -53,7 +52,6 @@ def generate_ca_and_leaf():
         .sign(ca_key, hashes.SHA256(), default_backend())
     )
 
-    # Generate Leaf cert signed by CA
     leaf_key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
     leaf_subject = x509.Name([
         x509.NameAttribute(x509.NameOID.COUNTRY_NAME, "IN"),
@@ -73,7 +71,6 @@ def generate_ca_and_leaf():
         .sign(ca_key, hashes.SHA256(), default_backend())
     )
 
-    # Save certs to files
     with open(CA_CERT_FILE, "wb") as f: f.write(ca_cert.public_bytes(serialization.Encoding.PEM))
     with open(CA_KEY_FILE, "wb") as f: f.write(ca_key.private_bytes(
         serialization.Encoding.PEM,
@@ -91,28 +88,55 @@ def generate_ca_and_leaf():
 
 
 def check_and_renew_certs():
+    """Check expiry of leaf cert; regenerate if close to expiry."""
     try:
         with open(LEAF_CERT_FILE, "rb") as f:
             leaf_cert = x509.load_pem_x509_certificate(f.read(), default_backend())
         expiry = leaf_cert.not_valid_after
         if expiry <= datetime.utcnow() + timedelta(days=RENEW_THRESHOLD_DAYS):
-            logger.info(f"⚠️ Leaf certificate expiring soon ({expiry}), regenerating...")
+            logger.info(f"⚠️ Leaf cert expiring soon ({expiry}), regenerating...")
             generate_ca_and_leaf()
         else:
             logger.info(f"✅ Leaf certificate valid until {expiry}")
     except FileNotFoundError:
-        logger.info("⚠️ No existing certs found, generating fresh ones...")
+        logger.info("⚠️ No certs found, generating new ones...")
         generate_ca_and_leaf()
 
 
 @app.get("/certs/generate")
 def generate_certs():
+    """Manually trigger certificate generation."""
     generate_ca_and_leaf()
     return {"message": "Certificates generated successfully"}
 
 
+@app.get("/certs/status")
+def cert_status():
+    """Show the current certificate validity and days remaining."""
+    try:
+        with open(LEAF_CERT_FILE, "rb") as f:
+            leaf_cert = x509.load_pem_x509_certificate(f.read(), default_backend())
+        with open(CA_CERT_FILE, "rb") as f:
+            ca_cert = x509.load_pem_x509_certificate(f.read(), default_backend())
+
+        leaf_expiry = leaf_cert.not_valid_after
+        ca_expiry = ca_cert.not_valid_after
+        days_remaining = (leaf_expiry - datetime.utcnow()).days
+
+        return {
+            "leaf_cert_valid_from": leaf_cert.not_valid_before.isoformat(),
+            "leaf_cert_valid_until": leaf_expiry.isoformat(),
+            "leaf_days_remaining": days_remaining,
+            "ca_cert_valid_from": ca_cert.not_valid_before.isoformat(),
+            "ca_cert_valid_until": ca_expiry.isoformat(),
+        }
+    except FileNotFoundError:
+        return {"error": "Certificates not found. Generate them using /certs/generate."}
+
+
 @app.post("/pdfs/signed")
 async def signed_pdf(html_file: UploadFile):
+    """Generate a signed PDF from an uploaded HTML file."""
     try:
         check_and_renew_certs()
 
@@ -128,7 +152,7 @@ async def signed_pdf(html_file: UploadFile):
         pdf_bytes = HTML(string=html_content.decode("utf-8")).write_pdf()
 
         cert_store = SimpleCertificateStore()
-        cert_store.add_trust_root(ca_cert)
+        cert_store.register(ca_cert)  # ✅ Correct registry call
 
         signer = signers.SimpleSigner(
             signing_cert=leaf_cert,
