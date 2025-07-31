@@ -2,7 +2,7 @@ import io
 import logging
 import tempfile
 from fastapi import FastAPI, UploadFile
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from weasyprint import HTML
 from cryptography.hazmat.primitives.serialization import load_pem_private_key
 from cryptography.hazmat.backends import default_backend
@@ -11,9 +11,6 @@ from cryptography import x509
 from pyhanko.sign import signers
 from pyhanko.sign.signers.pdf_signer import PdfSigner, PdfSignatureMetadata
 from pyhanko.sign.general import SigningError
-from pyhanko.sign.fields import SigFieldSpec
-from pyhanko_certvalidator.context import ValidationContext
-from pyhanko_certvalidator.registry import SimpleCertificateStore
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -55,31 +52,32 @@ async def signed_pdf(
         logger.info("🔑 Step 2: Validating certificate and private key")
         cert, private_key = check_cert_key_match(cert_bytes, key_bytes)
 
-        # Generate unsigned PDF
-        with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp_pdf:
-            HTML(string=html_content.decode("utf-8")).write_pdf(tmp_pdf.name)
-            unsigned_pdf_path = tmp_pdf.name
+        # Generate unsigned PDF in memory
+        pdf_bytes = HTML(string=html_content.decode("utf-8")).write_pdf()
 
-       logger.info("✍️ Step 3: Preparing SimpleSigner without cert_store.register")
-
+        logger.info("✍️ Step 3: Creating SimpleSigner (skip cert registry)")
         signer = signers.SimpleSigner(
-        signing_cert=cert,
-        signing_key=private_key,
-        cert_registry=None,  # ✅ don't use SimpleCertificateStore
-        validation_context=None,  # ✅ skip ValidationContext for now
-        signature_mechanism=signers.SignatureMechanism.RSASSA_PKCS1v15(hashes.SHA256())
-)
+            signing_cert=cert,
+            signing_key=private_key,
+            cert_registry=None,          # ✅ Avoid issuer_serial error
+            validation_context=None,     # ✅ Skip validation for now
+            signature_mechanism=signers.SignatureMechanism.RSASSA_PKCS1v15(hashes.SHA256())
+        )
 
-
-        logger.info("✍️ Step 4: Signing PDF using PdfSigner")
-        signed_output = tempfile.NamedTemporaryFile(delete=False, suffix=".pdf")
+        logger.info("✍️ Step 4: Signing PDF in memory")
+        buffer_in = io.BytesIO(pdf_bytes)
+        buffer_out = io.BytesIO()
 
         pdf_signer = PdfSigner(PdfSignatureMetadata(field_name="Signature1"), signer=signer)
-        with open(unsigned_pdf_path, "rb") as inf:
-            pdf_signer.sign_pdf(inf, output=signed_output)
+        pdf_signer.sign_pdf(buffer_in, output=buffer_out)
 
+        buffer_out.seek(0)
         logger.info("✅ PDF signing completed successfully")
-        return FileResponse(signed_output.name, media_type="application/pdf", filename="signed.pdf")
+        return StreamingResponse(
+            buffer_out, 
+            media_type="application/pdf",
+            headers={"Content-Disposition": "attachment; filename=signed.pdf"}
+        )
 
     except SigningError as se:
         logger.error(f"Signing failed: {se}")
