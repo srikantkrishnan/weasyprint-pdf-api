@@ -14,6 +14,7 @@ from pyhanko.sign import signers
 from pyhanko.sign.signers.pdf_signer import PdfSigner, PdfSignatureMetadata
 from pyhanko.sign.general import SigningError
 from pyhanko_certvalidator.registry import SimpleCertificateStore
+from pyhanko_certvalidator.util import load_cert_from_pemder
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -26,13 +27,12 @@ CA_KEY_FILE = os.path.join(CERT_DIR, "ca.key")
 LEAF_CERT_FILE = os.path.join(CERT_DIR, "leaf.pem")
 LEAF_KEY_FILE = os.path.join(CERT_DIR, "leaf.key")
 
-CA_VALIDITY_DAYS = 3650  # 10 years
-LEAF_VALIDITY_DAYS = 365  # 1 year
-RENEW_THRESHOLD_DAYS = 7  # renew if expiring soon
+CA_VALIDITY_DAYS = 3650
+LEAF_VALIDITY_DAYS = 365
+RENEW_THRESHOLD_DAYS = 7
 
 
 def generate_ca_and_leaf():
-    """Generate a root CA and leaf certificate, then save them to files."""
     ca_key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
     ca_subject = x509.Name([
         x509.NameAttribute(x509.NameOID.COUNTRY_NAME, "IN"),
@@ -88,7 +88,6 @@ def generate_ca_and_leaf():
 
 
 def check_and_renew_certs():
-    """Check expiry of leaf cert; regenerate if close to expiry."""
     try:
         with open(LEAF_CERT_FILE, "rb") as f:
             leaf_cert = x509.load_pem_x509_certificate(f.read(), default_backend())
@@ -105,14 +104,12 @@ def check_and_renew_certs():
 
 @app.get("/certs/generate")
 def generate_certs():
-    """Manually trigger certificate generation."""
     generate_ca_and_leaf()
     return {"message": "Certificates generated successfully"}
 
 
 @app.get("/certs/status")
 def cert_status():
-    """Show the current certificate validity and days remaining."""
     try:
         with open(LEAF_CERT_FILE, "rb") as f:
             leaf_cert = x509.load_pem_x509_certificate(f.read(), default_backend())
@@ -136,7 +133,6 @@ def cert_status():
 
 @app.post("/pdfs/signed")
 async def signed_pdf(html_file: UploadFile):
-    """Generate a signed PDF from an uploaded HTML file."""
     try:
         check_and_renew_certs()
 
@@ -145,20 +141,22 @@ async def signed_pdf(html_file: UploadFile):
         with open(LEAF_KEY_FILE, "rb") as f: leaf_key_bytes = f.read()
         with open(CA_CERT_FILE, "rb") as f: ca_cert_bytes = f.read()
 
-        leaf_cert = x509.load_pem_x509_certificate(leaf_cert_bytes, default_backend())
+        # Convert to ASN.1 certificates for pyHanko
+        leaf_cert_asn1 = load_cert_from_pemder(leaf_cert_bytes)
+        ca_cert_asn1 = load_cert_from_pemder(ca_cert_bytes)
+
         leaf_key = serialization.load_pem_private_key(leaf_key_bytes, password=None, backend=default_backend())
-        ca_cert = x509.load_pem_x509_certificate(ca_cert_bytes, default_backend())
 
         pdf_bytes = HTML(string=html_content.decode("utf-8")).write_pdf()
 
         cert_store = SimpleCertificateStore()
-        cert_store.register(ca_cert)  # ✅ Correct registry call
+        cert_store.register(ca_cert_asn1)
 
         signer = signers.SimpleSigner(
-            signing_cert=leaf_cert,
+            signing_cert=leaf_cert_asn1,
             signing_key=leaf_key,
             cert_registry=cert_store,
-            signing_cert_chain=[leaf_cert, ca_cert]
+            signing_cert_chain=[leaf_cert_asn1, ca_cert_asn1]
         )
 
         buffer_in = io.BytesIO(pdf_bytes)
