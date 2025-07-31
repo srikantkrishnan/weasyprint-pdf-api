@@ -12,7 +12,8 @@ from pyhanko.sign import signers
 from pyhanko.sign.signers.pdf_signer import PdfSigner, PdfSignatureMetadata
 from pyhanko.sign.general import SigningError
 from pyhanko.sign.fields import SigFieldSpec
-from pyhanko_certvalidator import CertificateStore
+from pyhanko_certvalidator.context import ValidationContext
+from pyhanko_certvalidator.registry import SimpleCertificateStore
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -59,11 +60,16 @@ async def signed_pdf(
             HTML(string=html_content.decode("utf-8")).write_pdf(tmp_pdf.name)
             unsigned_pdf_path = tmp_pdf.name
 
-        logger.info("✍️ Step 3: Creating SimpleSigner with RSA+SHA256")
+        logger.info("✍️ Step 3: Preparing ValidationContext and SimpleSigner")
+        cert_store = SimpleCertificateStore()
+        cert_store.register(cert)
+        validation_context = ValidationContext(trust_roots=cert_store)
+
         signer = signers.SimpleSigner(
             signing_cert=cert,
             signing_key=private_key,
-            cert_registry=CertificateStore(),  # ✅ Corrected import
+            cert_registry=cert_store,
+            validation_context=validation_context,
             signature_mechanism=signers.SignatureMechanism.RSASSA_PKCS1v15(hashes.SHA256())
         )
 
