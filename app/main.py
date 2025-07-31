@@ -1,73 +1,148 @@
 import io
 import logging
+import os
+import tempfile
+from datetime import datetime, timedelta
 from fastapi import FastAPI, UploadFile
 from fastapi.responses import JSONResponse, StreamingResponse
 from weasyprint import HTML
-from cryptography.hazmat.primitives.serialization import load_pem_private_key
-from cryptography.hazmat.backends import default_backend
 from cryptography import x509
+from cryptography.hazmat.primitives import hashes, serialization
+from cryptography.hazmat.primitives.asymmetric import rsa
+from cryptography.hazmat.backends import default_backend
 from pyhanko.sign import signers
 from pyhanko.sign.signers.pdf_signer import PdfSigner, PdfSignatureMetadata
 from pyhanko.sign.general import SigningError
+from pyhanko_certvalidator.registry import SimpleCertificateStore
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 app = FastAPI(title="WeasyPrint Signing API")
 
-# Safety pre-check function
-def check_cert_key_match(cert_pem: bytes, key_pem: bytes):
+# Temporary folder for certs
+CERT_DIR = tempfile.mkdtemp(prefix="certs_")
+CA_CERT_FILE = os.path.join(CERT_DIR, "ca.pem")
+CA_KEY_FILE = os.path.join(CERT_DIR, "ca.key")
+LEAF_CERT_FILE = os.path.join(CERT_DIR, "leaf.pem")
+LEAF_KEY_FILE = os.path.join(CERT_DIR, "leaf.key")
+
+CA_VALIDITY_DAYS = 3650  # 10 years
+LEAF_VALIDITY_DAYS = 365  # 1 year
+RENEW_THRESHOLD_DAYS = 7  # renew if expiring within next 7 days
+
+
+def generate_ca_and_leaf():
+    # Generate Root CA
+    ca_key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+    ca_subject = x509.Name([
+        x509.NameAttribute(x509.NameOID.COUNTRY_NAME, "IN"),
+        x509.NameAttribute(x509.NameOID.STATE_OR_PROVINCE_NAME, "Maharashtra"),
+        x509.NameAttribute(x509.NameOID.ORGANIZATION_NAME, "dMACQ Software"),
+        x509.NameAttribute(x509.NameOID.COMMON_NAME, "dMACQ Root CA"),
+    ])
+    ca_cert = (
+        x509.CertificateBuilder()
+        .subject_name(ca_subject)
+        .issuer_name(ca_subject)
+        .public_key(ca_key.public_key())
+        .serial_number(x509.random_serial_number())
+        .not_valid_before(datetime.utcnow())
+        .not_valid_after(datetime.utcnow() + timedelta(days=CA_VALIDITY_DAYS))
+        .add_extension(x509.BasicConstraints(ca=True, path_length=None), critical=True)
+        .sign(ca_key, hashes.SHA256(), default_backend())
+    )
+
+    # Generate Leaf cert signed by CA
+    leaf_key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+    leaf_subject = x509.Name([
+        x509.NameAttribute(x509.NameOID.COUNTRY_NAME, "IN"),
+        x509.NameAttribute(x509.NameOID.STATE_OR_PROVINCE_NAME, "Maharashtra"),
+        x509.NameAttribute(x509.NameOID.ORGANIZATION_NAME, "dMACQ Software"),
+        x509.NameAttribute(x509.NameOID.COMMON_NAME, "PDF Signer"),
+    ])
+    leaf_cert = (
+        x509.CertificateBuilder()
+        .subject_name(leaf_subject)
+        .issuer_name(ca_cert.subject)
+        .public_key(leaf_key.public_key())
+        .serial_number(x509.random_serial_number())
+        .not_valid_before(datetime.utcnow())
+        .not_valid_after(datetime.utcnow() + timedelta(days=LEAF_VALIDITY_DAYS))
+        .add_extension(x509.BasicConstraints(ca=False, path_length=None), critical=True)
+        .sign(ca_key, hashes.SHA256(), default_backend())
+    )
+
+    # Save certs to files
+    with open(CA_CERT_FILE, "wb") as f: f.write(ca_cert.public_bytes(serialization.Encoding.PEM))
+    with open(CA_KEY_FILE, "wb") as f: f.write(ca_key.private_bytes(
+        serialization.Encoding.PEM,
+        serialization.PrivateFormat.TraditionalOpenSSL,
+        serialization.NoEncryption()
+    ))
+    with open(LEAF_CERT_FILE, "wb") as f: f.write(leaf_cert.public_bytes(serialization.Encoding.PEM))
+    with open(LEAF_KEY_FILE, "wb") as f: f.write(leaf_key.private_bytes(
+        serialization.Encoding.PEM,
+        serialization.PrivateFormat.TraditionalOpenSSL,
+        serialization.NoEncryption()
+    ))
+
+    logger.info(f"✅ Certificates generated and saved in {CERT_DIR}")
+
+
+def check_and_renew_certs():
     try:
-        cert = x509.load_pem_x509_certificate(cert_pem, default_backend())
-        key = load_pem_private_key(key_pem, password=None, backend=default_backend())
+        with open(LEAF_CERT_FILE, "rb") as f:
+            leaf_cert = x509.load_pem_x509_certificate(f.read(), default_backend())
+        expiry = leaf_cert.not_valid_after
+        if expiry <= datetime.utcnow() + timedelta(days=RENEW_THRESHOLD_DAYS):
+            logger.info(f"⚠️ Leaf certificate expiring soon ({expiry}), regenerating...")
+            generate_ca_and_leaf()
+        else:
+            logger.info(f"✅ Leaf certificate valid until {expiry}")
+    except FileNotFoundError:
+        logger.info("⚠️ No existing certs found, generating fresh ones...")
+        generate_ca_and_leaf()
 
-        cert_pub = cert.public_key().public_numbers()
-        key_pub = key.public_key().public_numbers()
 
-        if cert_pub.n != key_pub.n or cert_pub.e != key_pub.e:
-            raise ValueError("Certificate and private key do NOT match.")
-        
-        logger.info("✅ Certificate and private key match confirmed.")
-        return cert, key
+@app.get("/certs/generate")
+def generate_certs():
+    generate_ca_and_leaf()
+    return {"message": "Certificates generated successfully"}
 
-    except Exception as e:
-        logger.error(f"❌ Cert/Key validation failed: {e}")
-        raise
 
 @app.post("/pdfs/signed")
-async def signed_pdf(
-    html_file: UploadFile,
-    cert_file: UploadFile,
-    key_file: UploadFile
-):
+async def signed_pdf(html_file: UploadFile):
     try:
-        logger.info("📄 Step 1: Generating unsigned PDF from HTML")
+        check_and_renew_certs()
+
         html_content = await html_file.read()
-        cert_bytes = await cert_file.read()
-        key_bytes = await key_file.read()
+        with open(LEAF_CERT_FILE, "rb") as f: leaf_cert_bytes = f.read()
+        with open(LEAF_KEY_FILE, "rb") as f: leaf_key_bytes = f.read()
+        with open(CA_CERT_FILE, "rb") as f: ca_cert_bytes = f.read()
 
-        # Safety check
-        logger.info("🔑 Step 2: Validating certificate and private key")
-        cert, private_key = check_cert_key_match(cert_bytes, key_bytes)
+        leaf_cert = x509.load_pem_x509_certificate(leaf_cert_bytes, default_backend())
+        leaf_key = serialization.load_pem_private_key(leaf_key_bytes, password=None, backend=default_backend())
+        ca_cert = x509.load_pem_x509_certificate(ca_cert_bytes, default_backend())
 
-        # Generate unsigned PDF in memory
         pdf_bytes = HTML(string=html_content.decode("utf-8")).write_pdf()
 
-        logger.info("✍️ Step 3: Creating SimpleSigner (pyHanko 0.29.1 compatible)")
+        cert_store = SimpleCertificateStore()
+        cert_store.add_trust_root(ca_cert)
+
         signer = signers.SimpleSigner(
-            signing_cert=cert,
-            signing_key=private_key
+            signing_cert=leaf_cert,
+            signing_key=leaf_key,
+            cert_registry=cert_store,
+            signing_cert_chain=[leaf_cert, ca_cert]
         )
 
-        logger.info("✍️ Step 4: Signing PDF in memory")
         buffer_in = io.BytesIO(pdf_bytes)
         buffer_out = io.BytesIO()
-
         pdf_signer = PdfSigner(PdfSignatureMetadata(field_name="Signature1"), signer=signer)
         pdf_signer.sign_pdf(buffer_in, output=buffer_out)
 
         buffer_out.seek(0)
-        logger.info("✅ PDF signing completed successfully")
         return StreamingResponse(
             buffer_out,
             media_type="application/pdf",
@@ -75,11 +150,11 @@ async def signed_pdf(
         )
 
     except SigningError as se:
-        logger.error(f"Signing failed: {se}")
         return JSONResponse(status_code=500, content={"error": f"Signing failed: {str(se)}"})
     except Exception as e:
         logger.error("❌ Error generating signed PDF", exc_info=True)
         return JSONResponse(status_code=500, content={"error": str(e)})
+
 
 @app.get("/")
 def root():
