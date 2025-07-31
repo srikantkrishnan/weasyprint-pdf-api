@@ -19,6 +19,8 @@ from pyhanko.sign.general import SigningError
 from pyhanko_certvalidator.registry import SimpleCertificateStore
 from asn1crypto import pem, x509 as asn1_x509
 
+import asyncio
+
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
@@ -116,6 +118,29 @@ def check_and_renew_certs():
 
 
 # --------------------------
+# Signing helper (async safe)
+# --------------------------
+async def sign_pdf_bytes(pdf_bytes: bytes, leaf_cert_asn1, leaf_key, ca_cert_asn1):
+    cert_store = SimpleCertificateStore()
+    cert_store.register(ca_cert_asn1)
+
+    signer = signers.SimpleSigner(
+        signing_cert=leaf_cert_asn1,
+        signing_key=leaf_key,
+        cert_registry=cert_store,
+    )
+
+    input_buf = io.BytesIO(pdf_bytes)
+    output_buf = io.BytesIO()
+
+    pdf_signer = PdfSigner(PdfSignatureMetadata(field_name="Signature1"), signer=signer)
+    await pdf_signer.async_sign_pdf(input_buf, output=output_buf)
+
+    output_buf.seek(0)
+    return output_buf
+
+
+# --------------------------
 # API Endpoints
 # --------------------------
 @app.get("/certs/generate")
@@ -151,32 +176,16 @@ async def signed_pdf(html_file: UploadFile):
         with open(LEAF_KEY_FILE, "rb") as f: leaf_key_bytes = f.read()
         with open(CA_CERT_FILE, "rb") as f: ca_cert_bytes = f.read()
 
-        # Convert to ASN.1
         leaf_cert_asn1 = load_asn1_cert(leaf_cert_bytes)
         ca_cert_asn1 = load_asn1_cert(ca_cert_bytes)
-
         leaf_key = serialization.load_pem_private_key(leaf_key_bytes, password=None, backend=default_backend())
 
         pdf_bytes = HTML(string=html_content.decode("utf-8")).write_pdf()
 
-        cert_store = SimpleCertificateStore()
-        cert_store.register(ca_cert_asn1)
+        signed_buf = await sign_pdf_bytes(pdf_bytes, leaf_cert_asn1, leaf_key, ca_cert_asn1)
 
-        signer = signers.SimpleSigner(
-            signing_cert=leaf_cert_asn1,
-            signing_key=leaf_key,
-            cert_registry=cert_store
-        )
-
-        input_buf = io.BytesIO(pdf_bytes)
-        output_buf = io.BytesIO()
-
-        pdf_signer = PdfSigner(PdfSignatureMetadata(field_name="Signature1"), signer=signer)
-        pdf_signer.sign_pdf(input_buf, output=output_buf)
-
-        output_buf.seek(0)
         return StreamingResponse(
-            output_buf,
+            signed_buf,
             media_type="application/pdf",
             headers={"Content-Disposition": "attachment; filename=signed.pdf"}
         )
@@ -189,7 +198,7 @@ async def signed_pdf(html_file: UploadFile):
 
 
 @app.get("/pdfs/self-test")
-def pdf_self_test():
+async def pdf_self_test():
     try:
         check_and_renew_certs()
         html_content = "<h1>Signed Hello World 🚀</h1>"
@@ -203,24 +212,10 @@ def pdf_self_test():
         ca_cert_asn1 = load_asn1_cert(ca_cert_bytes)
         leaf_key = serialization.load_pem_private_key(leaf_key_bytes, password=None, backend=default_backend())
 
-        cert_store = SimpleCertificateStore()
-        cert_store.register(ca_cert_asn1)
+        signed_buf = await sign_pdf_bytes(pdf_bytes, leaf_cert_asn1, leaf_key, ca_cert_asn1)
 
-        signer = signers.SimpleSigner(
-            signing_cert=leaf_cert_asn1,
-            signing_key=leaf_key,
-            cert_registry=cert_store
-        )
-
-        input_buf = io.BytesIO(pdf_bytes)
-        output_buf = io.BytesIO()
-
-        pdf_signer = PdfSigner(PdfSignatureMetadata(field_name="Signature1"), signer=signer)
-        pdf_signer.sign_pdf(input_buf, output=output_buf)
-
-        output_buf.seek(0)
         return StreamingResponse(
-            output_buf,
+            signed_buf,
             media_type="application/pdf",
             headers={"Content-Disposition": "attachment; filename=hello-signed.pdf"}
         )
