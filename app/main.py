@@ -53,12 +53,10 @@ async def signed_pdf(
         # Generate unsigned PDF in memory
         pdf_bytes = HTML(string=html_content.decode("utf-8")).write_pdf()
 
-        logger.info("✍️ Step 3: Creating SimpleSigner (default RSA+SHA256)")
+        logger.info("✍️ Step 3: Creating SimpleSigner (pyHanko 0.29.1 compatible)")
         signer = signers.SimpleSigner(
             signing_cert=cert,
-            signing_key=private_key,
-            cert_registry=None,      # Skip registry for Rust cryptography compat
-            validation_context=None  # Skip validation for now
+            signing_key=private_key
         )
 
         logger.info("✍️ Step 4: Signing PDF in memory")
