@@ -1,12 +1,10 @@
 import io
 import logging
-import tempfile
 from fastapi import FastAPI, UploadFile
-from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
+from fastapi.responses import JSONResponse, StreamingResponse
 from weasyprint import HTML
 from cryptography.hazmat.primitives.serialization import load_pem_private_key
 from cryptography.hazmat.backends import default_backend
-from cryptography.hazmat.primitives import hashes
 from cryptography import x509
 from pyhanko.sign import signers
 from pyhanko.sign.signers.pdf_signer import PdfSigner, PdfSignatureMetadata
@@ -55,13 +53,12 @@ async def signed_pdf(
         # Generate unsigned PDF in memory
         pdf_bytes = HTML(string=html_content.decode("utf-8")).write_pdf()
 
-        logger.info("✍️ Step 3: Creating SimpleSigner (skip cert registry)")
+        logger.info("✍️ Step 3: Creating SimpleSigner (default RSA+SHA256)")
         signer = signers.SimpleSigner(
             signing_cert=cert,
             signing_key=private_key,
-            cert_registry=None,          # ✅ Avoid issuer_serial error
-            validation_context=None,     # ✅ Skip validation for now
-            signature_mechanism=signers.SignatureMechanism.RSASSA_PKCS1v15(hashes.SHA256())
+            cert_registry=None,      # Skip registry for Rust cryptography compat
+            validation_context=None  # Skip validation for now
         )
 
         logger.info("✍️ Step 4: Signing PDF in memory")
@@ -74,7 +71,7 @@ async def signed_pdf(
         buffer_out.seek(0)
         logger.info("✅ PDF signing completed successfully")
         return StreamingResponse(
-            buffer_out, 
+            buffer_out,
             media_type="application/pdf",
             headers={"Content-Disposition": "attachment; filename=signed.pdf"}
         )
