@@ -14,7 +14,7 @@ from pyhanko.sign import signers
 from pyhanko.sign.signers.pdf_signer import PdfSigner, PdfSignatureMetadata
 from pyhanko.sign.general import SigningError
 from pyhanko_certvalidator.registry import SimpleCertificateStore
-from pyhanko_certvalidator.util import load_cert_from_pemder
+from asn1crypto import pem, x509 as asn1_x509
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -87,6 +87,15 @@ def generate_ca_and_leaf():
     logger.info(f"✅ Certificates generated and saved in {CERT_DIR}")
 
 
+def load_asn1_cert(cert_bytes: bytes):
+    """Convert PEM/DER cert to ASN.1 (asn1crypto) for pyHanko."""
+    if pem.detect(cert_bytes):
+        type_name, headers, der_bytes = pem.unarmor(cert_bytes)
+    else:
+        der_bytes = cert_bytes
+    return asn1_x509.Certificate.load(der_bytes)
+
+
 def check_and_renew_certs():
     try:
         with open(LEAF_CERT_FILE, "rb") as f:
@@ -141,12 +150,11 @@ async def signed_pdf(html_file: UploadFile):
         with open(LEAF_KEY_FILE, "rb") as f: leaf_key_bytes = f.read()
         with open(CA_CERT_FILE, "rb") as f: ca_cert_bytes = f.read()
 
-        # Convert to ASN.1 certificates for pyHanko
-        leaf_cert_asn1 = load_cert_from_pemder(leaf_cert_bytes)
-        ca_cert_asn1 = load_cert_from_pemder(ca_cert_bytes)
+        # Convert to ASN.1 for pyHanko
+        leaf_cert_asn1 = load_asn1_cert(leaf_cert_bytes)
+        ca_cert_asn1 = load_asn1_cert(ca_cert_bytes)
 
         leaf_key = serialization.load_pem_private_key(leaf_key_bytes, password=None, backend=default_backend())
-
         pdf_bytes = HTML(string=html_content.decode("utf-8")).write_pdf()
 
         cert_store = SimpleCertificateStore()
