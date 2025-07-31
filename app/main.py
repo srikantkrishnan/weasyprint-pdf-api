@@ -1,7 +1,7 @@
 import io
 import logging
 import tempfile
-from fastapi import FastAPI, UploadFile, Form
+from fastapi import FastAPI, UploadFile
 from fastapi.responses import FileResponse, JSONResponse
 from weasyprint import HTML
 from cryptography.hazmat.primitives.serialization import load_pem_private_key
@@ -10,6 +10,9 @@ from cryptography.hazmat.primitives import hashes
 from cryptography import x509
 from pyhanko.sign import signers
 from pyhanko.sign.signers.pdf_signer import PdfSigner, PdfSignatureMetadata
+from pyhanko.sign.general import SigningError
+from pyhanko.sign.fields import SigFieldSpec
+from pyhanko_certvalidator import CertificateStore
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -60,7 +63,7 @@ async def signed_pdf(
         signer = signers.SimpleSigner(
             signing_cert=cert,
             signing_key=private_key,
-            cert_registry=signers.SimpleCertificateStore(),
+            cert_registry=CertificateStore(),  # ✅ Corrected import
             signature_mechanism=signers.SignatureMechanism.RSASSA_PKCS1v15(hashes.SHA256())
         )
 
@@ -74,6 +77,9 @@ async def signed_pdf(
         logger.info("✅ PDF signing completed successfully")
         return FileResponse(signed_output.name, media_type="application/pdf", filename="signed.pdf")
 
+    except SigningError as se:
+        logger.error(f"Signing failed: {se}")
+        return JSONResponse(status_code=500, content={"error": f"Signing failed: {str(se)}"})
     except Exception as e:
         logger.error("❌ Error generating signed PDF", exc_info=True)
         return JSONResponse(status_code=500, content={"error": str(e)})
