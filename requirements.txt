@@ -24,3 +24,4 @@ pikepdf==8.12.0
 # New deps for OpenSSL-based PDF signing overlay
 reportlab==4.0.9
 PyPDF2==3.0.1
+pymupdf==1.24.2   # PyMuPDF
