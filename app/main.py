@@ -24,7 +24,6 @@ logger = logging.getLogger(__name__)
 
 app = FastAPI(title="WeasyPrint Signing API")
 
-# Cert/key storage
 CERT_DIR = tempfile.mkdtemp(prefix="certs_")
 CA_CERT_FILE = os.path.join(CERT_DIR, "ca.pem")
 CA_KEY_FILE = os.path.join(CERT_DIR, "ca.key")
@@ -37,11 +36,9 @@ RENEW_THRESHOLD_DAYS = 7
 
 
 # --------------------------
-# Helpers
+# Certificate helpers
 # --------------------------
 def generate_ca_and_leaf():
-    logger.info("🔑 Generating new CA and Leaf certificates")
-
     ca_key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
     ca_subject = x509.Name([
         x509.NameAttribute(x509.NameOID.COUNTRY_NAME, "IN"),
@@ -97,9 +94,7 @@ def generate_ca_and_leaf():
         with open(file, "wb") as f:
             f.write(data)
 
-    logger.info("✅ Certificates generated and saved")
-    log_cert_details("CA Certificate", ca_cert)
-    log_cert_details("Leaf Certificate", leaf_cert)
+    logger.info("✅ New CA and leaf certificates generated")
 
 
 def load_asn1_cert(cert_bytes: bytes):
@@ -110,27 +105,13 @@ def load_asn1_cert(cert_bytes: bytes):
     return asn1_x509.Certificate.load(der_bytes)
 
 
-def log_cert_details(label, cert: x509.Certificate):
-    logger.info(f"🔍 {label}:")
-    logger.info(f"    Subject: {cert.subject.rfc4514_string()}")
-    logger.info(f"    Issuer: {cert.issuer.rfc4514_string()}")
-    logger.info(f"    Serial: {cert.serial_number}")
-    logger.info(f"    Valid From: {cert.not_valid_before}")
-    logger.info(f"    Valid Until: {cert.not_valid_after}")
-
-
 def check_and_renew_certs():
     try:
         with open(LEAF_CERT_FILE, "rb") as f:
             leaf_cert = x509.load_pem_x509_certificate(f.read(), default_backend())
-        expiry = leaf_cert.not_valid_after
-        if expiry <= datetime.utcnow() + timedelta(days=RENEW_THRESHOLD_DAYS):
-            logger.info(f"⚠️ Leaf cert expiring soon ({expiry}), regenerating...")
+        if leaf_cert.not_valid_after <= datetime.utcnow() + timedelta(days=RENEW_THRESHOLD_DAYS):
             generate_ca_and_leaf()
-        else:
-            logger.info(f"✅ Leaf certificate valid until {expiry}")
     except FileNotFoundError:
-        logger.info("⚠️ No certs found, generating new ones...")
         generate_ca_and_leaf()
 
 
@@ -150,29 +131,30 @@ def cert_status():
             leaf_cert = x509.load_pem_x509_certificate(f.read(), default_backend())
         with open(CA_CERT_FILE, "rb") as f:
             ca_cert = x509.load_pem_x509_certificate(f.read(), default_backend())
-
         return {
-            "leaf_cert_subject": leaf_cert.subject.rfc4514_string(),
-            "leaf_cert_valid_until": leaf_cert.not_valid_after.isoformat(),
-            "ca_cert_subject": ca_cert.subject.rfc4514_string(),
-            "ca_cert_valid_until": ca_cert.not_valid_after.isoformat(),
+            "leaf_subject": leaf_cert.subject.rfc4514_string(),
+            "leaf_valid_until": leaf_cert.not_valid_after.isoformat(),
+            "ca_subject": ca_cert.subject.rfc4514_string(),
+            "ca_valid_until": ca_cert.not_valid_after.isoformat(),
         }
     except FileNotFoundError:
-        return {"error": "Certificates not found. Generate them using /certs/generate."}
+        return {"error": "Certificates not found. Run /certs/generate first."}
 
 
 @app.post("/pdfs/signed")
 async def signed_pdf(html_file: UploadFile):
     try:
         check_and_renew_certs()
-
         html_content = await html_file.read()
+
         with open(LEAF_CERT_FILE, "rb") as f: leaf_cert_bytes = f.read()
         with open(LEAF_KEY_FILE, "rb") as f: leaf_key_bytes = f.read()
         with open(CA_CERT_FILE, "rb") as f: ca_cert_bytes = f.read()
 
+        # Convert to ASN.1
         leaf_cert_asn1 = load_asn1_cert(leaf_cert_bytes)
         ca_cert_asn1 = load_asn1_cert(ca_cert_bytes)
+
         leaf_key = serialization.load_pem_private_key(leaf_key_bytes, password=None, backend=default_backend())
 
         pdf_bytes = HTML(string=html_content.decode("utf-8")).write_pdf()
@@ -186,36 +168,31 @@ async def signed_pdf(html_file: UploadFile):
             cert_registry=cert_store
         )
 
-        buffer_in = io.BytesIO(pdf_bytes)
-        buffer_out = io.BytesIO()
-        pdf_signer = PdfSigner(PdfSignatureMetadata(field_name="Signature1"), signer=signer)
-        pdf_signer.sign_pdf(buffer_in, output=buffer_out)
+        input_buf = io.BytesIO(pdf_bytes)
+        output_buf = io.BytesIO()
 
-        buffer_out.seek(0)
+        pdf_signer = PdfSigner(PdfSignatureMetadata(field_name="Signature1"), signer=signer)
+        pdf_signer.sign_pdf(input_buf, output=output_buf)
+
+        output_buf.seek(0)
         return StreamingResponse(
-            buffer_out,
+            output_buf,
             media_type="application/pdf",
             headers={"Content-Disposition": "attachment; filename=signed.pdf"}
         )
 
     except SigningError as se:
-        logger.error(f"Signing failed: {se}")
         return JSONResponse(status_code=500, content={"error": f"Signing failed: {str(se)}"})
     except Exception as e:
-        logger.error("❌ Error generating signed PDF", exc_info=True)
+        logger.error("❌ PDF signing failed", exc_info=True)
         return JSONResponse(status_code=500, content={"error": str(e)})
 
 
 @app.get("/pdfs/self-test")
 def pdf_self_test():
-    """
-    Generates a simple 'Hello World' PDF and signs it.
-    Useful to verify that the full signing pipeline works.
-    """
     try:
         check_and_renew_certs()
-
-        html_content = "<h1>Hello from dMACQ 🚀</h1><p>This is a test signed PDF.</p>"
+        html_content = "<h1>Signed Hello World 🚀</h1>"
         pdf_bytes = HTML(string=html_content).write_pdf()
 
         with open(LEAF_CERT_FILE, "rb") as f: leaf_cert_bytes = f.read()
@@ -235,14 +212,15 @@ def pdf_self_test():
             cert_registry=cert_store
         )
 
-        buffer_in = io.BytesIO(pdf_bytes)
-        buffer_out = io.BytesIO()
-        pdf_signer = PdfSigner(PdfSignatureMetadata(field_name="Signature1"), signer=signer)
-        pdf_signer.sign_pdf(buffer_in, output=buffer_out)
+        input_buf = io.BytesIO(pdf_bytes)
+        output_buf = io.BytesIO()
 
-        buffer_out.seek(0)
+        pdf_signer = PdfSigner(PdfSignatureMetadata(field_name="Signature1"), signer=signer)
+        pdf_signer.sign_pdf(input_buf, output=output_buf)
+
+        output_buf.seek(0)
         return StreamingResponse(
-            buffer_out,
+            output_buf,
             media_type="application/pdf",
             headers={"Content-Disposition": "attachment; filename=hello-signed.pdf"}
         )
