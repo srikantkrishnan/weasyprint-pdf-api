@@ -60,18 +60,16 @@ async def signed_pdf(
             HTML(string=html_content.decode("utf-8")).write_pdf(tmp_pdf.name)
             unsigned_pdf_path = tmp_pdf.name
 
-        logger.info("✍️ Step 3: Preparing ValidationContext and SimpleSigner")
-        cert_store = SimpleCertificateStore()
-        cert_store.register(cert)
-        validation_context = ValidationContext(trust_roots=cert_store)
+       logger.info("✍️ Step 3: Preparing SimpleSigner without cert_store.register")
 
         signer = signers.SimpleSigner(
-            signing_cert=cert,
-            signing_key=private_key,
-            cert_registry=cert_store,
-            validation_context=validation_context,
-            signature_mechanism=signers.SignatureMechanism.RSASSA_PKCS1v15(hashes.SHA256())
-        )
+        signing_cert=cert,
+        signing_key=private_key,
+        cert_registry=None,  # ✅ don't use SimpleCertificateStore
+        validation_context=None,  # ✅ skip ValidationContext for now
+        signature_mechanism=signers.SignatureMechanism.RSASSA_PKCS1v15(hashes.SHA256())
+)
+
 
         logger.info("✍️ Step 4: Signing PDF using PdfSigner")
         signed_output = tempfile.NamedTemporaryFile(delete=False, suffix=".pdf")
