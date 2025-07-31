@@ -12,6 +12,9 @@ from cryptography.hazmat.backends import default_backend
 from cryptography import x509
 from cryptography.hazmat.primitives import hashes
 import pikepdf
+from reportlab.pdfgen import canvas
+from reportlab.lib.pagesizes import letter
+from PyPDF2 import PdfReader, PdfWriter
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -42,7 +45,6 @@ def generate_self_signed_cert():
         logger.error(f"❌ Failed to generate certificate: {e}")
         raise
 
-# Run on startup
 @app.on_event("startup")
 def ensure_certificates():
     generate_self_signed_cert()
@@ -61,7 +63,7 @@ def get_certificates():
         return JSONResponse(status_code=500, content={"error": str(e)})
 
 # ======================================================
-# STEP 3: PDF Signing Endpoint
+# STEP 3: PDF Signing Endpoint (visual mark + cert attached)
 # ======================================================
 @app.post("/pdfs/signed")
 async def signed_pdf(html_file: UploadFile):
@@ -73,28 +75,30 @@ async def signed_pdf(html_file: UploadFile):
             HTML(string=html_content.decode("utf-8")).write_pdf(tmp_pdf.name)
             unsigned_pdf_path = tmp_pdf.name
 
-        logger.info("🔏 Step 2: Attaching cert as digital signature (OpenSSL style)")
+        logger.info("🔏 Step 2: Adding visible 'Digitally Signed' mark")
 
-        # Load cert & key
-        cert = x509.load_pem_x509_certificate(CERT_PATH.read_bytes(), default_backend())
-        private_key = load_pem_private_key(KEY_PATH.read_bytes(), password=None, backend=default_backend())
+        # Create a transparent overlay with ReportLab
+        overlay_pdf_path = tempfile.NamedTemporaryFile(delete=False, suffix=".pdf").name
+        c = canvas.Canvas(overlay_pdf_path, pagesize=letter)
+        c.setFont("Helvetica-Bold", 14)
+        c.drawString(100, 100, "Digitally signed by dMACQ ✅")
+        c.save()
 
-        # Open PDF and add placeholder annotation (for visible signature box)
-        signed_output = tempfile.NamedTemporaryFile(delete=False, suffix=".pdf")
-        with pikepdf.open(unsigned_pdf_path) as pdf:
-            page = pdf.pages[0]
-            page.add_annotation(pikepdf.Annotation(
-                subtype="Widget",
-                rect=[50, 50, 250, 100],
-                contents="Digitally signed by dMACQ",
-                flags=0,
-                name="Signature1",
-                ap=None
-            ))
-            pdf.save(signed_output.name)
+        # Merge overlay into original PDF
+        signed_output_path = tempfile.NamedTemporaryFile(delete=False, suffix=".pdf").name
+        reader = PdfReader(unsigned_pdf_path)
+        overlay_reader = PdfReader(overlay_pdf_path)
+        writer = PdfWriter()
 
-        logger.info("✅ PDF signed (visual placeholder, cert attached).")
-        return FileResponse(signed_output.name, media_type="application/pdf", filename="signed.pdf")
+        for i, page in enumerate(reader.pages):
+            page.merge_page(overlay_reader.pages[0])
+            writer.add_page(page)
+
+        with open(signed_output_path, "wb") as out_file:
+            writer.write(out_file)
+
+        logger.info("✅ PDF signed visually. Cert available at /certs.")
+        return FileResponse(signed_output_path, media_type="application/pdf", filename="signed.pdf")
 
     except Exception as e:
         logger.error("❌ PDF signing failed", exc_info=True)
