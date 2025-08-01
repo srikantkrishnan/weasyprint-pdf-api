@@ -2,23 +2,22 @@ import os
 import io
 import logging
 from typing import Optional, List
+
 from fastapi import FastAPI, File, Form, UploadFile, HTTPException
 from fastapi.responses import StreamingResponse, JSONResponse
 from weasyprint import HTML
 from pyhanko.sign import signers
 from pyhanko.pdf_utils.incremental_writer import IncrementalPdfFileWriter
 from pyhanko.sign.signers import PdfSignatureMetadata
-from pyhanko_certvalidator.registry import SimpleCertificateStore
-from pyhanko.keys import Certificate as PyHankoCertificate
-
-# --- NEW IMPORTS FOR LOW-LEVEL CRYPTOGRAPHY ---
-from cryptography.hazmat.primitives.serialization import pkcs12
-from cryptography.hazmat.backends import default_backend
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("main")
 
 app = FastAPI(title="dMACQ Minutes Signing API")
+
+CERTS_PATH = "/var/data/certs"
+os.makedirs(CERTS_PATH, exist_ok=True)
+
 
 def embed_names_in_html(html_text, secretary_name, chair_name):
     """Embed secretary and chairperson names into the HTML content."""
@@ -50,7 +49,6 @@ async def signed_minutes(
     key_password: Optional[str] = Form("", description="Password for PEM private key"),
     chain_files: List[UploadFile] = File(None, description="Upload one or more PEM CA certificates"),
 ):
-    temp_pdf_path = None
     try:
         # Step 1: Read and modify HTML
         logger.info("📄 Step 1: Preparing HTML")
@@ -60,54 +58,43 @@ async def signed_minutes(
 
         # Step 2: Generate unsigned PDF
         logger.info("🖨️ Step 2: Generating unsigned PDF")
-        with open("unsigned_output.pdf", "wb") as f:
-            HTML(string=modified_html).write_pdf(f)
-        temp_pdf_path = "unsigned_output.pdf"
+        temp_pdf_path = "/var/data/unsigned_output.pdf"
+        HTML(string=modified_html).write_pdf(temp_pdf_path)
 
         # Step 3: Load signing credentials
         logger.info("🔑 Step 3: Loading signing credentials")
         signer = None
 
         if pfx_file:
-            pfx_data = await pfx_file.read()
-            # --- THIS IS THE CORRECT, ROBUST, LOW-LEVEL WAY TO LOAD PFX ---
-            private_key, cert, additional_certs = pkcs12.load_key_and_certificates(
-                data=pfx_data,
-                password=pfx_password.encode() if pfx_password else None,
-                backend=default_backend()
-            )
-            
-            # Create a pyhanko-compatible certificate store
-            cert_store = SimpleCertificateStore()
-            pyhanko_cert = PyHankoCertificate.from_cryptography_certificate(cert)
-            cert_store.register(pyhanko_cert)
-            
-            # Register additional certificates (the chain) if they exist
-            if additional_certs:
-                for c in additional_certs:
-                    cert_store.register(PyHankoCertificate.from_cryptography_certificate(c))
-            
-            # Create the signer using the loaded objects
-            signer = signers.SimpleSigner(
-                signing_cert=pyhanko_cert,
-                signing_key=private_key,
-                cert_registry=cert_store
-            )
+            pfx_path = os.path.join(CERTS_PATH, "uploaded_cert.pfx")
+            with open(pfx_path, "wb") as f:
+                f.write(await pfx_file.read())
 
+            signer = signers.SimpleSigner.load_pkcs12(
+                pfx_path,
+                passphrase=pfx_password.encode() if pfx_password else None,
+            )
         elif cert_file and key_file:
-            # This logic remains the same as it was already working
-            cert_data = await cert_file.read()
-            key_data = await key_file.read()
-            ca_chain_data = []
+            cert_path = os.path.join(CERTS_PATH, "uploaded_cert.pem")
+            key_path = os.path.join(CERTS_PATH, "uploaded_key.pem")
+            with open(cert_path, "wb") as f:
+                f.write(await cert_file.read())
+            with open(key_path, "wb") as f:
+                f.write(await key_file.read())
+
+            chain_paths = []
             if chain_files:
-                for cf in chain_files:
+                for idx, cf in enumerate(chain_files):
                     if getattr(cf, "filename", None):
-                        ca_chain_data.append(await cf.read())
+                        chain_path = os.path.join(CERTS_PATH, f"chain_{idx}.pem")
+                        with open(chain_path, "wb") as f:
+                            f.write(await cf.read())
+                        chain_paths.append(chain_path)
 
             signer = signers.SimpleSigner.load(
-                key_file=io.BytesIO(key_data),
-                cert_file=io.BytesIO(cert_data),
-                ca_chain_files=[io.BytesIO(c) for c in ca_chain_data] if ca_chain_data else (),
+                key_file=key_path,
+                cert_file=cert_path,
+                ca_chain_files=chain_paths,
                 key_passphrase=key_password.encode() if key_password else None,
             )
         else:
@@ -145,5 +132,7 @@ async def signed_minutes(
         logger.error(f"❌ Error signing PDF: {e}", exc_info=True)
         return JSONResponse(status_code=500, content={"error": str(e)})
     finally:
-        if temp_pdf_path and os.path.exists(temp_pdf_path):
+        try:
             os.remove(temp_pdf_path)
+        except OSError:
+            pass
