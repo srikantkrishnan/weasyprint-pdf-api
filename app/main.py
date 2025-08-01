@@ -42,7 +42,7 @@ async def signed_minutes(
     cert_file: Optional[UploadFile] = File(None, description="Upload PEM certificate file"),
     key_file: Optional[UploadFile] = File(None, description="Upload PEM private key file"),
     key_password: Optional[str] = Form("", description="Password for PEM private key"),
-    chain_files: Optional[List[UploadFile]] = File(None, description="Upload optional CA chain PEM certificates"),
+    chain_files: Optional[List[UploadFile]] = File(None, description="Upload one or more PEM CA certificates"),
 ):
     try:
         # Step 1: Read and modify HTML
@@ -58,6 +58,8 @@ async def signed_minutes(
 
         # Step 3: Load signing credentials
         logger.info("🔑 Step 3: Loading signing credentials")
+        signer = None
+
         if pfx_file:
             pfx_data = await pfx_file.read()
             signer = signers.SimpleSigner.load_pkcs12(
@@ -70,8 +72,9 @@ async def signed_minutes(
             ca_chain_data = []
             if chain_files:
                 for cf in chain_files:
-                    if getattr(cf, "filename", None):  # ignore empty inputs
+                    if getattr(cf, "filename", None):
                         ca_chain_data.append(await cf.read())
+
             signer = signers.SimpleSigner.load(
                 key_file=io.BytesIO(key_data),
                 cert_file=io.BytesIO(cert_data),
