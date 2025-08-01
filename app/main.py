@@ -16,6 +16,7 @@ app = FastAPI(title="dMACQ Minutes Signing API")
 # Persistent cert storage path
 CERT_PATH = "/var/data/dmacq_signer.pfx"
 
+
 def embed_names_in_html(html_text, secretary_name, chair_name):
     """Embed secretary and chairperson names into the HTML content."""
     insert_text = (
@@ -34,6 +35,14 @@ def embed_names_in_html(html_text, secretary_name, chair_name):
     return html_text
 
 
+@app.on_event("startup")
+async def check_cert():
+    """Ensure persistent storage path exists."""
+    os.makedirs("/var/data", exist_ok=True)
+    if not os.path.exists(CERT_PATH):
+        logger.warning("⚠️ No PFX certificate found. Upload one via /upload-cert.")
+
+
 @app.post("/upload-cert")
 async def upload_cert(pfx_file: UploadFile = File(...), pfx_password: str = Form(...)):
     """Upload a PFX certificate and save it on the persistent disk."""
@@ -42,6 +51,7 @@ async def upload_cert(pfx_file: UploadFile = File(...), pfx_password: str = Form
         with open(CERT_PATH, "wb") as f:
             f.write(await pfx_file.read())
         os.environ["PFX_PASSWORD"] = pfx_password
+        logger.info("✅ Certificate uploaded successfully")
         return {"message": "Certificate uploaded successfully"}
     except Exception as e:
         logger.error(f"❌ Error uploading certificate: {e}", exc_info=True)
@@ -55,12 +65,18 @@ async def signed_minutes(
     chairperson_name: str = Form(..., description="Chairperson's full name"),
 ):
     """Generate PDF from HTML and sign with stored certificate."""
+    temp_pdf_path = "/var/data/unsigned_output.pdf"
+
     try:
         # Step 1: Ensure cert exists
         if not os.path.exists(CERT_PATH):
             raise HTTPException(status_code=400, detail="No certificate uploaded. Use /upload-cert first.")
 
-        cert_pass = os.environ.get("PFX_PASSWORD", "").encode()
+        cert_pass = os.environ.get("PFX_PASSWORD", "")
+        if not cert_pass:
+            raise HTTPException(status_code=400, detail="Certificate password not set. Please re-upload cert.")
+
+        cert_pass = cert_pass.encode()
 
         # Step 2: Read and modify HTML
         logger.info("📄 Step 1: Preparing HTML")
@@ -70,30 +86,27 @@ async def signed_minutes(
 
         # Step 3: Generate unsigned PDF
         logger.info("🖨️ Step 2: Generating unsigned PDF")
-        temp_pdf_path = "/var/data/unsigned_output.pdf"
         HTML(string=modified_html).write_pdf(temp_pdf_path)
 
-        # Step 4: Load signer from persistent disk
+        # Step 4: Load signer from PFX
         logger.info("🔑 Step 3: Loading signing credentials")
         signer = signers.SimpleSigner.load_pkcs12(
             pfx_file=CERT_PATH,
-            passphrase=cert_pass if cert_pass else None
+            passphrase=cert_pass
         )
 
-        # Step 5: Apply signature
+        # Step 5: Apply signature (async-safe)
         logger.info("✍️ Step 4: Signing PDF")
         signed_buf = io.BytesIO()
         with open(temp_pdf_path, "rb") as unsigned_pdf:
             pdf_writer = IncrementalPdfFileWriter(unsigned_pdf)
-            signers.sign_pdf(
+            await signer.async_sign_pdf(
                 pdf_writer,
                 PdfSignatureMetadata(
-                    field_name="Signature",
-                    reason="Document digitally signed by Company Secretary",
-                    location="dMACQ Software Private Limited, Mumbai, Maharashtra, India",
+                    reason="Digitally signed board minutes",
+                    location="dMACQ Software Pvt Ltd, Mumbai, India",
                     contact_info="info@dmacq.com",
                 ),
-                signer=signer,
                 output=signed_buf,
             )
 
@@ -108,7 +121,13 @@ async def signed_minutes(
         logger.error(f"❌ Error signing PDF: {e}", exc_info=True)
         return JSONResponse(status_code=500, content={"error": str(e)})
     finally:
-        try:
-            os.remove(temp_pdf_path)
-        except OSError:
-            pass
+        if os.path.exists(temp_pdf_path):
+            try:
+                os.remove(temp_pdf_path)
+            except OSError:
+                pass
+
+
+@app.get("/health")
+async def health_check():
+    return {"status": "ok"}
