@@ -39,12 +39,12 @@ async def signed_minutes(
     html_file: UploadFile = File(...),
     secretary_name: str = Form(...),
     chairperson_name: str = Form(...),
-    pfx_file: Optional[UploadFile] = File(None),
+    pfx_file: UploadFile = File(None),
     pfx_password: Optional[str] = Form(""),
-    cert_file: Optional[UploadFile] = File(None),
-    key_file: Optional[UploadFile] = File(None),
+    cert_file: UploadFile = File(None),
+    key_file: UploadFile = File(None),
     key_password: Optional[str] = Form(""),
-    chain_files: Optional[List[UploadFile]] = File(None),
+    chain_files: List[UploadFile] = File(None),
 ):
     # Normalize Swagger behavior for optional files
     if chain_files:
