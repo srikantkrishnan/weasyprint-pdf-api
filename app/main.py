@@ -11,12 +11,13 @@ from weasyprint import HTML
 
 from cryptography.hazmat.primitives.serialization import load_pem_private_key
 from cryptography.hazmat.backends import default_backend
+from cryptography import x509
 
 from pyhanko.sign import signers
 from pyhanko.sign.signers.pdf_signer import PdfSigner, PdfSignatureMetadata
 from pyhanko.sign.fields import SigFieldSpec
-# --- THIS IS THE KEY CHANGE: NO MORE pyhanko_certvalidator IMPORTS ---
-from pyhanko.keys import get_pyca_crypto_signer
+from pyhanko_certvalidator.registry import SimpleCertificateStore
+from pyhanko.keys import Certificate as PyHankoCertificate # Import pyhanko's Certificate class
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -46,14 +47,25 @@ async def signed_minutes(
         cert_bytes = await cert_file.read()
         key_bytes = await key_file.read()
 
-        # --- THIS IS THE CORRECT, RELIABLE WAY ---
-        # The get_pyca_crypto_signer function in `pyhanko.keys` is designed
-        # to handle the certificate and private key directly from bytes,
-        # creating a PyHanko-compatible signer object without the need for
-        # manual certificate parsing or problematic imports.
-        signer = get_pyca_crypto_signer(key_bytes, cert_bytes)
+        # Load the certificate and key using cryptography
+        cert = x509.load_pem_x509_certificate(cert_bytes, default_backend())
+        private_key = load_pem_private_key(key_bytes, password=None, backend=default_backend())
 
-        logger.info("✍️ Step 3: Signer created")
+        # --- THIS IS THE FINAL, WORKING SOLUTION ---
+        # Convert the cryptography cert object to a pyhanko-compatible one
+        pyhanko_cert = PyHankoCertificate.from_cryptography_certificate(cert)
+        
+        logger.info("✍️ Step 3: Creating signer")
+        
+        # Now we can use the pyhanko-compatible object
+        cert_store = SimpleCertificateStore()
+        cert_store.register(pyhanko_cert)
+        
+        signer = signers.SimpleSigner(
+            signing_cert=pyhanko_cert,
+            signing_key=private_key,
+            cert_registry=cert_store
+        )
         
         logger.info("🖊 Step 4: Adding metadata + visual stamp")
         ist = pytz.timezone("Asia/Kolkata")
