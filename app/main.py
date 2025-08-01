@@ -1,8 +1,6 @@
 import os
 import io
 import logging
-from typing import List
-
 from fastapi import FastAPI, File, Form, UploadFile, HTTPException
 from fastapi.responses import StreamingResponse, JSONResponse
 from weasyprint import HTML
@@ -37,56 +35,29 @@ async def signed_minutes(
     html_file: UploadFile = File(...),
     secretary_name: str = Form(...),
     chairperson_name: str = Form(...),
-    pfx_file: UploadFile = File(None),
-    pfx_password: str = Form(""),
-    cert_file: UploadFile = File(None),
-    key_file: UploadFile = File(None),
-    key_password: str = Form(""),
-    chain_files: List[UploadFile] = File(None)
+    pfx_file: UploadFile = File(...),  # ✅ required for now
+    pfx_password: str = Form("")
 ):
     try:
-        # ✅ Normalize empty Swagger behavior for chain_files
-        if chain_files:
-            chain_files = [cf for cf in chain_files if getattr(cf, "filename", None)]
-            if not chain_files:  # if only empty values came through
-                chain_files = None
-
         # Step 1: Read HTML and embed names
         logger.info("📄 Step 1: Preparing HTML")
         html_bytes = await html_file.read()
         html_text = html_bytes.decode("utf-8")
         modified_html = embed_names_in_html(html_text, secretary_name, chairperson_name)
 
-        # Step 2: Generate unsigned PDF in memory
+        # Step 2: Generate unsigned PDF
         logger.info("🖨️ Step 2: Generating unsigned PDF")
         unsigned_buf = io.BytesIO()
         HTML(string=modified_html).write_pdf(unsigned_buf)
         unsigned_buf.seek(0)
 
-        # Step 3: Load signing credentials
+        # Step 3: Load signing credentials (PFX only)
         logger.info("🔑 Step 3: Loading signing credentials")
-        signer = None
-        if pfx_file:
-            pfx_data = await pfx_file.read()
-            signer = signers.SimpleSigner.load_pkcs12(
-                pfx_file=io.BytesIO(pfx_data),
-                passphrase=pfx_password.encode() if pfx_password else None
-            )
-        elif cert_file and key_file:
-            cert_data = await cert_file.read()
-            key_data = await key_file.read()
-            ca_chain_data = []
-            if chain_files:
-                for cf in chain_files:
-                    ca_chain_data.append(await cf.read())
-            signer = signers.SimpleSigner.load(
-                key_file=io.BytesIO(key_data),
-                cert_file=io.BytesIO(cert_data),
-                ca_chain_files=[io.BytesIO(c) for c in ca_chain_data],
-                key_passphrase=key_password.encode() if key_password else None
-            )
-        else:
-            raise HTTPException(status_code=400, detail="No signing credentials provided")
+        pfx_data = await pfx_file.read()
+        signer = signers.SimpleSigner.load_pkcs12(
+            pfx_file=io.BytesIO(pfx_data),
+            passphrase=pfx_password.encode() if pfx_password else None
+        )
 
         # Step 4: Configure metadata
         signature_meta = PdfSignatureMetadata(
