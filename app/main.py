@@ -1,118 +1,121 @@
+import os
 import io
 import logging
-import tempfile
-from datetime import datetime
-import pytz
-import os
-
-from fastapi import FastAPI, UploadFile, Form
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi import FastAPI, File, Form, UploadFile
+from fastapi.responses import StreamingResponse, JSONResponse
 from weasyprint import HTML
-
-from cryptography.hazmat.primitives.serialization import load_pem_private_key
-from cryptography.hazmat.backends import default_backend
-from cryptography import x509
-
 from pyhanko.sign import signers
-from pyhanko.sign.signers.pdf_signer import PdfSigner, PdfSignatureMetadata
-from pyhanko.sign.fields import SigFieldSpec
-from pyhanko_certvalidator.registry import SimpleCertificateStore
-from pyhanko.keys import Certificate as PyHankoCertificate # Import pyhanko's Certificate class
+from pyhanko.pdf_utils.incremental_writer import IncrementalPdfFileWriter
+from pyhanko.sign.signers import PdfSignatureMetadata
 
 logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
+logger = logging.getLogger("main")
 
 app = FastAPI(title="dMACQ Minutes Signing API")
 
+def embed_names_in_html(html_text, secretary_name, chair_name):
+    """Embed secretary and chairperson names into the HTML content."""
+    if "SECRETARY_NAME" in html_text or "CHAIR_NAME" in html_text:
+        html_text = html_text.replace("SECRETARY_NAME", secretary_name)
+        html_text = html_text.replace("CHAIR_NAME", chair_name)
+    else:
+        insert_text = (
+            f"<p><strong>Chair: </strong>{chair_name}<br>"
+            f"<strong>Secretary: </strong>{secretary_name}</p>\n"
+        )
+        lowered = html_text.lower()
+        if "</body>" in lowered:
+            pos = lowered.rfind("</body>")
+            html_text = html_text[:pos] + insert_text + html_text[pos:]
+        elif "</html>" in lowered:
+            pos = lowered.rfind("</html>")
+            html_text = html_text[:pos] + insert_text + html_text[pos:]
+        else:
+            html_text += "\n" + insert_text
+    return html_text
+
+
 @app.post("/minutes/signed")
 async def signed_minutes(
-    html_file: UploadFile,
-    cert_file: UploadFile,
-    key_file: UploadFile,
-    secretary_name: str = Form(...),
-    chairperson_name: str = Form(...)
+    html_file: UploadFile = File(..., description="HTML file for minutes"),
+    secretary_name: str = Form(..., description="Secretary full name"),
+    chair_name: str = Form(..., description="Chairperson full name"),
+    # Option 1: PKCS#12 bundle
+    pfx_file: UploadFile = File(None, description="PFX file containing cert+key"),
+    pfx_password: str = Form("", description="PFX password"),
+    # Option 2: PEM certs
+    cert_file: UploadFile = File(None, description="PEM certificate"),
+    key_file: UploadFile = File(None, description="PEM private key"),
+    key_password: str = Form("", description="PEM key password"),
+    chain_files: list[UploadFile] = None
 ):
-    unsigned_pdf_path = ""
-    signed_output_path = ""
-
     try:
-        logger.info("📄 Step 1: Converting HTML to PDF")
-        html_content = await html_file.read()
-        
-        with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp_pdf:
-            HTML(string=html_content.decode("utf-8")).write_pdf(tmp_pdf.name)
-            unsigned_pdf_path = tmp_pdf.name
+        # Step 1: Read HTML and embed names
+        logger.info("📄 Step 1: Preparing HTML")
+        html_bytes = await html_file.read()
+        html_text = html_bytes.decode("utf-8")
+        modified_html = embed_names_in_html(html_text, secretary_name, chair_name)
 
-        logger.info("🔑 Step 2: Loading certificate and private key")
-        cert_bytes = await cert_file.read()
-        key_bytes = await key_file.read()
+        # Step 2: Generate unsigned PDF
+        logger.info("🖨️ Step 2: Generating unsigned PDF")
+        temp_pdf_path = "unsigned_output.pdf"
+        HTML(string=modified_html).write_pdf(temp_pdf_path)
 
-        # Load the certificate and key using cryptography
-        cert = x509.load_pem_x509_certificate(cert_bytes, default_backend())
-        private_key = load_pem_private_key(key_bytes, password=None, backend=default_backend())
+        # Step 3: Load signing credentials
+        logger.info("🔑 Step 3: Loading signing credentials")
+        if pfx_file:
+            pfx_data = await pfx_file.read()
+            signer = signers.SimpleSigner.load_pkcs12(
+                pfx_file=io.BytesIO(pfx_data),
+                passphrase=pfx_password.encode() if pfx_password else None
+            )
+        elif cert_file and key_file:
+            cert_data = await cert_file.read()
+            key_data = await key_file.read()
+            ca_chain_data = []
+            if chain_files:
+                for cf in chain_files:
+                    ca_chain_data.append(await cf.read())
 
-        # --- THIS IS THE FINAL, WORKING SOLUTION ---
-        # Convert the cryptography cert object to a pyhanko-compatible one
-        pyhanko_cert = PyHankoCertificate.from_cryptography_certificate(cert)
-        
-        logger.info("✍️ Step 3: Creating signer")
-        
-        # Now we can use the pyhanko-compatible object
-        cert_store = SimpleCertificateStore()
-        cert_store.register(pyhanko_cert)
-        
-        signer = signers.SimpleSigner(
-            signing_cert=pyhanko_cert,
-            signing_key=private_key,
-            cert_registry=cert_store
-        )
-        
-        logger.info("🖊 Step 4: Adding metadata + visual stamp")
-        ist = pytz.timezone("Asia/Kolkata")
-        timestamp = datetime.now(ist).strftime("%d %B %Y, %I:%M %p IST")
+            signer = signers.SimpleSigner.load(
+                key_file=io.BytesIO(key_data),
+                cert_file=io.BytesIO(cert_data),
+                ca_chain_files=[io.BytesIO(c) for c in ca_chain_data],
+                key_passphrase=key_password.encode() if key_password else None
+            )
+        else:
+            return JSONResponse(status_code=400, content={"error": "No signing credentials provided"})
 
-        pdf_meta = PdfSignatureMetadata(
-            field_name="dMACQ_Signature",
-            reason=f"Minutes signed by Secretary {secretary_name} and Chairperson {chairperson_name}",
-            location="Mumbai, India",
-            contact_info="info@dmacq.com",
-        )
-
-        sig_field_spec = SigFieldSpec(
-            sig_field_name="dMACQ_Signature",
-            box=(50, 700, 250, 750),
-            page=0
+        # Step 4: Configure metadata
+        signature_meta = PdfSignatureMetadata(
+            field_name="Signature",
+            reason="Document digitally signed by Company Secretary",
+            location="dMACQ Software Private Limited, Mumbai, Maharashtra, India",
+            contact_info="info@dmacq.com"
         )
 
-        logger.info("🔏 Step 5: Signing PDF")
-        
-        with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as signed_tmp_file:
-            signed_output_path = signed_tmp_file.name
-            pdf_signer = PdfSigner(pdf_meta, signer=signer)
-            
-            with open(unsigned_pdf_path, "rb") as inf:
-                pdf_signer.prepare_signing(
-                    inf,
-                    output_stream=signed_tmp_file,
-                    new_field_spec=sig_field_spec
-                )
-            
-            signed_tmp_file.flush()
+        # Step 5: Apply signature
+        logger.info("✍️ Step 4: Signing PDF")
+        signed_buf = io.BytesIO()
+        with open(temp_pdf_path, "rb") as unsigned_pdf:
+            pdf_writer = IncrementalPdfFileWriter(unsigned_pdf)
+            signers.sign_pdf(
+                pdf_writer,
+                signature_meta,
+                signer=signer,
+                output=signed_buf
+            )
 
-        logger.info("✅ PDF signed successfully")
-
-        return FileResponse(
-            signed_output_path,
-            media_type="application/pdf",
-            filename="signed_minutes.pdf"
-        )
+        signed_buf.seek(0)
+        return StreamingResponse(signed_buf, media_type="application/pdf", headers={
+            "Content-Disposition": "attachment; filename=signed_minutes.pdf"
+        })
 
     except Exception as e:
-        logger.error("❌ Error signing PDF", exc_info=True)
+        logger.error(f"❌ Error signing PDF: {e}", exc_info=True)
         return JSONResponse(status_code=500, content={"error": str(e)})
-
     finally:
-        if unsigned_pdf_path and os.path.exists(unsigned_pdf_path):
-            os.remove(unsigned_pdf_path)
-        if signed_output_path and os.path.exists(signed_output_path):
-            os.remove(signed_output_path)
+        try:
+            os.remove(temp_pdf_path)
+        except OSError:
+            pass
