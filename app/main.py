@@ -10,14 +10,13 @@ from weasyprint import HTML
 
 from cryptography.hazmat.primitives.serialization import load_pem_private_key
 from cryptography.hazmat.backends import default_backend
-# Note: We no longer need to import x509 from cryptography
 
 from pyhanko.sign import signers
 from pyhanko.sign.signers.pdf_signer import PdfSigner, PdfSignatureMetadata
 from pyhanko.sign.fields import SigFieldSpec
 from pyhanko_certvalidator.registry import SimpleCertificateStore
-# Import the helper function to load certificates in a pyhanko-compatible way
-from pyhanko_certvalidator.pem_parser import parse_pem_certificates
+# --- THIS IS THE CORRECTED IMPORT ---
+from pyhanko_certvalidator import parse_pem_certificates
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -32,10 +31,15 @@ async def signed_minutes(
     secretary_name: str = Form(...),
     chairperson_name: str = Form(...)
 ):
+    # Use temporary file paths for cleaner cleanup
+    unsigned_pdf_path = ""
+    signed_output_path = ""
+
     try:
         # Step 1: Convert HTML to PDF
         logger.info("📄 Step 1: Converting HTML to PDF")
         html_content = await html_file.read()
+        
         with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp_pdf:
             HTML(string=html_content.decode("utf-8")).write_pdf(tmp_pdf.name)
             unsigned_pdf_path = tmp_pdf.name
@@ -45,16 +49,14 @@ async def signed_minutes(
         cert_bytes = await cert_file.read()
         key_bytes = await key_file.read()
 
-        # --- THIS IS THE CRITICAL CHANGE ---
         # Use pyhanko's parser to load the certificate from PEM data
+        # This creates a pyhanko-compatible certificate object
         cert = parse_pem_certificates(cert_bytes)[0]
-        # Load the private key as before (pyhanko's signer can handle this)
         private_key = load_pem_private_key(key_bytes, password=None, backend=default_backend())
 
         # Step 3: Create signer using PyHanko's SimpleSigner
         logger.info("✍️ Step 3: Creating signer")
         
-        # Create a certificate store and register the correctly-parsed cert
         cert_store = SimpleCertificateStore()
         cert_store.register(cert)
         
@@ -74,6 +76,7 @@ async def signed_minutes(
             reason=f"Minutes signed by Secretary {secretary_name} and Chairperson {chairperson_name}",
             location="Mumbai, India",
             contact_info="info@dmacq.com",
+            # We can also add a timestamp, though PyHanko can do this automatically with a TSA
         )
 
         sig_field_spec = SigFieldSpec(
@@ -84,21 +87,24 @@ async def signed_minutes(
 
         # Step 5: Sign PDF
         logger.info("🔏 Step 5: Signing PDF")
-        signed_output = tempfile.NamedTemporaryFile(delete=False, suffix=".pdf")
         
-        pdf_signer = PdfSigner(pdf_meta, signer=signer)
-        with open(unsigned_pdf_path, "rb") as inf:
-            pdf_signer.prepare_signing(
-                inf,
-                output_stream=signed_output,
-                new_field_spec=sig_field_spec
-            )
-            signed_output.flush()
+        with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as signed_tmp_file:
+            signed_output_path = signed_tmp_file.name
+            pdf_signer = PdfSigner(pdf_meta, signer=signer)
+            
+            with open(unsigned_pdf_path, "rb") as inf:
+                pdf_signer.prepare_signing(
+                    inf,
+                    output_stream=signed_tmp_file,
+                    new_field_spec=sig_field_spec
+                )
+            
+            signed_tmp_file.flush()
 
         logger.info("✅ PDF signed successfully")
 
         return FileResponse(
-            signed_output.name,
+            signed_output_path,
             media_type="application/pdf",
             filename="signed_minutes.pdf"
         )
@@ -107,7 +113,9 @@ async def signed_minutes(
         logger.error("❌ Error signing PDF", exc_info=True)
         return JSONResponse(status_code=500, content={"error": str(e)})
 
-
-@app.get("/")
-def root():
-    return {"message": "dMACQ Minutes Signing API is running 🚀"}
+    finally:
+        # Clean up temporary files
+        if unsigned_pdf_path and os.path.exists(unsigned_pdf_path):
+            os.remove(unsigned_pdf_path)
+        if signed_output_path and os.path.exists(signed_output_path):
+            os.remove(signed_output_path)
