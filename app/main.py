@@ -8,7 +8,7 @@ from fastapi import FastAPI, UploadFile, Form
 from fastapi.responses import FileResponse, JSONResponse
 from weasyprint import HTML
 
-# Re-importing cryptography libraries, as we'll load the cert/key manually
+# Re-importing cryptography libraries
 from cryptography.hazmat.primitives.serialization import load_pem_private_key
 from cryptography.hazmat.backends import default_backend
 from cryptography import x509
@@ -17,7 +17,8 @@ from pyhanko.sign import signers
 from pyhanko.sign.signers.pdf_signer import PdfSigner, PdfSignatureMetadata
 from pyhanko.sign.fields import SigFieldSpec
 from pyhanko_certvalidator.registry import SimpleCertificateStore
-from pyhanko.sign.validation import ValidationContext
+
+# Removed the unused ValidationContext import
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -45,26 +46,25 @@ async def signed_minutes(
         cert_bytes = await cert_file.read()
         key_bytes = await key_file.read()
 
-        # Load the certificate and key manually
         cert = x509.load_pem_x509_certificate(cert_bytes, default_backend())
         private_key = load_pem_private_key(key_bytes, password=None, backend=default_backend())
 
         # Step 3: Create signer using PyHanko's SimpleSigner
         logger.info("✍️ Step 3: Creating signer")
-        
-        # We must manually create a certificate store and register the cert
-        # This solves the `AttributeError` from before by providing a cert_registry
+
+        # --- THIS IS THE CRITICAL CHANGE ---
+        # 1. Create a certificate store
         cert_store = SimpleCertificateStore()
-        # Note: The `cert_store.register` method expects a certificate object
-        # from its own library. To get around this, we can try to wrap it or
-        # let SimpleSigner handle it.
+        # 2. Register the certificate in the store
+        #    This is now safe because the SimpleSigner will use the cert_store,
+        #    which knows how to handle the certificate object correctly.
+        cert_store.register(cert)
         
+        # 3. Pass the cert_store to the SimpleSigner constructor
         signer = signers.SimpleSigner(
             signing_cert=cert,
-            signing_key=private_key
-            # The SimpleSigner constructor can take a cert_registry, but we can
-            # let it handle it internally for a self-signed certificate case.
-            # If you have a full chain, you would pass it here.
+            signing_key=private_key,
+            cert_registry=cert_store  # <-- THIS WAS THE MISSING ARGUMENT
         )
         
         # Step 4: Add metadata + visual stamp
