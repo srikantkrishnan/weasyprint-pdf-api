@@ -37,12 +37,12 @@ async def signed_minutes(
     html_file: UploadFile = File(..., description="HTML file for minutes"),
     secretary_name: str = Form(..., description="Secretary's full name"),
     chairperson_name: str = Form(..., description="Chairperson's full name"),
-    pfx_file: UploadFile = File(None, description="Upload PKCS#12 (.pfx/.p12) file containing cert+key"),
-    pfx_password: Optional[str] = Form("", description="Password for the PFX file"),
-    cert_file: Optional[UploadFile] = File(None, description="Upload PEM certificate file"),
-    key_file: Optional[UploadFile] = File(None, description="Upload PEM private key file"),
-    key_password: Optional[str] = Form("", description="Password for PEM private key"),
-    chain_files: Optional[List[UploadFile]] = File(None, description="Upload one or more PEM CA certificates"),
+    pfx_file: UploadFile = File(default=None, description="Upload PKCS#12 (.pfx/.p12) file containing cert+key"),
+    pfx_password: str = Form(default="", description="Password for PFX file"),
+    cert_file: UploadFile = File(default=None, description="Upload PEM certificate file"),
+    key_file: UploadFile = File(default=None, description="Upload PEM private key file"),
+    key_password: str = Form(default="", description="Password for PEM private key"),
+    chain_files: List[UploadFile] = File(default=None, description="Upload CA chain PEM files (one or more)")
 ):
     try:
         # Step 1: Read and modify HTML
