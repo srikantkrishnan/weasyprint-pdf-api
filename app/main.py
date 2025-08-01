@@ -35,7 +35,7 @@ async def signed_minutes(
     html_file: UploadFile = File(...),
     secretary_name: str = Form(...),
     chairperson_name: str = Form(...),
-    pfx_file: UploadFile = File(...),  # ✅ required for now
+    pfx_file: UploadFile = File(...),  # required
     pfx_password: str = Form("")
 ):
     try:
@@ -45,17 +45,17 @@ async def signed_minutes(
         html_text = html_bytes.decode("utf-8")
         modified_html = embed_names_in_html(html_text, secretary_name, chairperson_name)
 
-        # Step 2: Generate unsigned PDF
+        # Step 2: Generate unsigned PDF into memory
         logger.info("🖨️ Step 2: Generating unsigned PDF")
         unsigned_buf = io.BytesIO()
         HTML(string=modified_html).write_pdf(unsigned_buf)
         unsigned_buf.seek(0)
 
-        # Step 3: Load signing credentials (PFX only)
+        # Step 3: Load signing credentials (raw PFX bytes)
         logger.info("🔑 Step 3: Loading signing credentials")
         pfx_data = await pfx_file.read()
         signer = signers.SimpleSigner.load_pkcs12(
-            pfx_file=io.BytesIO(pfx_data),
+            pfx_data,  # ✅ raw bytes, not BytesIO
             passphrase=pfx_password.encode() if pfx_password else None
         )
 
