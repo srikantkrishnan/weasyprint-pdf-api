@@ -10,14 +10,14 @@ from pyhanko.pdf_utils.incremental_writer import IncrementalPdfFileWriter
 from pyhanko.sign.signers import PdfSignatureMetadata
 from datetime import datetime
 
-# Ensure persistent directory
+# Persistent storage paths
 PERSIST_DIR = "/var/data"
 os.makedirs(PERSIST_DIR, exist_ok=True)
 
-# Audit log file
+CERT_PATH = os.path.join(PERSIST_DIR, "dmacq_signer.pfx")
 AUDIT_LOG_FILE = os.path.join(PERSIST_DIR, "signing_audit.log")
 
-# Configure logging (console + file)
+# Logging setup (console + file)
 logger = logging.getLogger("main")
 logger.setLevel(logging.DEBUG)
 formatter = logging.Formatter("%(asctime)s [%(levelname)s] %(message)s")
@@ -31,8 +31,6 @@ file_handler.setFormatter(formatter)
 logger.addHandler(file_handler)
 
 app = FastAPI(title="dMACQ Minutes Signing API")
-
-CERT_PATH = os.path.join(PERSIST_DIR, "dmacq_signer.pfx")
 
 
 def embed_names_in_html(html_text, secretary_name, chair_name):
@@ -52,20 +50,12 @@ def embed_names_in_html(html_text, secretary_name, chair_name):
     return html_text
 
 
-@app.on_event("startup")
-async def check_cert():
-    if not os.path.exists(CERT_PATH):
-        logger.warning("⚠️ No PFX certificate found. Upload one via /upload-cert.")
-    else:
-        logger.info("✅ Certificate found in persistent storage")
-
-
 @app.post("/upload-cert")
-async def upload_cert(pfx_file: UploadFile = File(...), pfx_password: str = Form(...)):
+async def upload_cert(pfx_file: UploadFile = File(...)):
+    """Upload the PFX cert. Password must be set in Render Environment as PFX_PASSWORD."""
     try:
         with open(CERT_PATH, "wb") as f:
             f.write(await pfx_file.read())
-        os.environ["PFX_PASSWORD"] = pfx_password
         msg = "Certificate uploaded successfully"
         logger.info(f"✅ {msg}")
         return {"message": msg}
@@ -75,15 +65,46 @@ async def upload_cert(pfx_file: UploadFile = File(...), pfx_password: str = Form
         raise HTTPException(status_code=500, detail=error_msg)
 
 
+@app.get("/cert/status")
+async def cert_status():
+    """Check if cert + password are valid and show certificate info."""
+    cert_exists = os.path.exists(CERT_PATH)
+    password_set = bool(os.environ.get("PFX_PASSWORD"))
+    valid_cert = False
+    error_message = None
+    cert_subject = None
+
+    if cert_exists and password_set:
+        try:
+            cert_pass = os.environ["PFX_PASSWORD"].encode()
+            signer = signers.SimpleSigner.load_pkcs12(
+                pfx_file=CERT_PATH,
+                passphrase=cert_pass
+            )
+            valid_cert = True
+            if signer.signing_cert:
+                cert_subject = signer.signing_cert.subject.human_friendly
+        except Exception as e:
+            error_message = str(e)
+
+    return {
+        "cert_exists": cert_exists,
+        "password_set": password_set,
+        "valid_cert": valid_cert,
+        "cert_subject": cert_subject,
+        "error": error_message,
+        "audit_log": AUDIT_LOG_FILE,
+    }
+
+
 @app.post("/minutes/signed")
 async def signed_minutes(
     html_file: UploadFile = File(...),
     secretary_name: str = Form(...),
     chairperson_name: str = Form(...),
 ):
-    return await process_signing(html_text=(await html_file.read()).decode("utf-8"),
-                                 secretary_name=secretary_name,
-                                 chairperson_name=chairperson_name)
+    return await process_signing((await html_file.read()).decode("utf-8"),
+                                 secretary_name, chairperson_name)
 
 
 @app.get("/debug/sign")
@@ -98,20 +119,17 @@ async def debug_sign():
     </body>
     </html>
     """
-    return await process_signing(html_text=test_html,
-                                 secretary_name="Test Secretary",
-                                 chairperson_name="Test Chairperson")
+    return await process_signing(test_html, "Test Secretary", "Test Chairperson")
 
 
 async def process_signing(html_text: str, secretary_name: str, chairperson_name: str):
     temp_pdf_path = os.path.join(PERSIST_DIR, "unsigned_output.pdf")
-
     try:
         if not os.path.exists(CERT_PATH):
-            raise HTTPException(status_code=400, detail="No certificate uploaded. Use /upload-cert first.")
+            raise HTTPException(status_code=400, detail="Upload certificate first at /upload-cert")
         cert_pass = os.environ.get("PFX_PASSWORD", "").encode()
         if not cert_pass:
-            raise HTTPException(status_code=400, detail="Certificate password not set. Please re-upload cert.")
+            raise HTTPException(status_code=400, detail="PFX_PASSWORD not set in Render Environment")
 
         logger.info("📄 Preparing HTML")
         modified_html = embed_names_in_html(html_text, secretary_name, chairperson_name)
@@ -121,10 +139,7 @@ async def process_signing(html_text: str, secretary_name: str, chairperson_name:
         logger.info(f"✅ Unsigned PDF written at {temp_pdf_path}")
 
         logger.info("🔑 Loading signing credentials from PFX")
-        signer = signers.SimpleSigner.load_pkcs12(
-            pfx_file=CERT_PATH,
-            passphrase=cert_pass
-        )
+        signer = signers.SimpleSigner.load_pkcs12(CERT_PATH, passphrase=cert_pass)
         logger.info("✅ Signer loaded successfully")
 
         logger.info("✍️ Signing PDF using run_in_executor")
@@ -136,10 +151,10 @@ async def process_signing(html_text: str, secretary_name: str, chairperson_name:
                 signers.sign_pdf(
                     pdf_writer,
                     PdfSignatureMetadata(
+                        field_name="Signature1",  # ensure a field is created
                         reason="Digitally signed board minutes",
                         location="dMACQ Software Pvt Ltd, Mumbai, India",
                         contact_info="info@dmacq.com",
-                        field_name=None  # Let PyHanko create a new field if needed
                     ),
                     signer=signer,
                     output=signed_buf,
@@ -150,8 +165,7 @@ async def process_signing(html_text: str, secretary_name: str, chairperson_name:
         loop = asyncio.get_event_loop()
         signed_result = await loop.run_in_executor(None, blocking_sign)
 
-        success_msg = f"✅ Signing completed successfully at {datetime.now().isoformat()}"
-        logger.info(success_msg)
+        logger.info(f"✅ Signing completed successfully at {datetime.now().isoformat()}")
 
         return StreamingResponse(
             signed_result,
@@ -170,15 +184,6 @@ async def process_signing(html_text: str, secretary_name: str, chairperson_name:
                 logger.info(f"🗑️ Temp file {temp_pdf_path} deleted")
             except OSError as cleanup_err:
                 logger.warning(f"⚠️ Failed to delete temp file: {cleanup_err}")
-
-
-@app.get("/cert/status")
-async def cert_status():
-    return {
-        "cert_exists": os.path.exists(CERT_PATH),
-        "password_set": bool(os.environ.get("PFX_PASSWORD")),
-        "audit_log": AUDIT_LOG_FILE,
-    }
 
 
 @app.get("/health")
