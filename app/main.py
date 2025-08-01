@@ -1,14 +1,19 @@
 import os
 import io
 import logging
-from typing import List, Optional
+from typing import Optional, List
 from fastapi import FastAPI, File, Form, UploadFile, HTTPException
 from fastapi.responses import StreamingResponse, JSONResponse
 from weasyprint import HTML
 from pyhanko.sign import signers
 from pyhanko.pdf_utils.incremental_writer import IncrementalPdfFileWriter
 from pyhanko.sign.signers import PdfSignatureMetadata
-from pyhanko.keys import load_pyca_signer_from_pfx_data  # ✅ Correct import
+from pyhanko_certvalidator.registry import SimpleCertificateStore
+from pyhanko.keys import Certificate as PyHankoCertificate
+
+# --- NEW IMPORTS FOR LOW-LEVEL CRYPTOGRAPHY ---
+from cryptography.hazmat.primitives.serialization import pkcs12
+from cryptography.hazmat.backends import default_backend
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("main")
@@ -38,13 +43,14 @@ async def signed_minutes(
     html_file: UploadFile = File(..., description="HTML file for minutes"),
     secretary_name: str = Form(..., description="Secretary's full name"),
     chairperson_name: str = Form(..., description="Chairperson's full name"),
-    pfx_file: UploadFile = File(None, description="Upload PKCS#12 (.pfx/.p12) file containing cert+key"),
-    pfx_password: str = Form("", description="Password for the PFX file"),
-    cert_file: UploadFile = File(None, description="Upload PEM certificate file"),
-    key_file: UploadFile = File(None, description="Upload PEM private key file"),
-    key_password: str = Form("", description="Password for PEM private key"),
+    pfx_file: Optional[UploadFile] = File(None, description="Upload PKCS#12 (.pfx/.p12) file containing cert+key"),
+    pfx_password: Optional[str] = Form("", description="Password for the PFX file"),
+    cert_file: Optional[UploadFile] = File(None, description="Upload PEM certificate file"),
+    key_file: Optional[UploadFile] = File(None, description="Upload PEM private key file"),
+    key_password: Optional[str] = Form("", description="Password for PEM private key"),
     chain_files: Optional[List[UploadFile]] = File(None, description="Upload one or more PEM CA certificates"),
 ):
+    temp_pdf_path = None
     try:
         # Step 1: Read and modify HTML
         logger.info("📄 Step 1: Preparing HTML")
@@ -54,8 +60,9 @@ async def signed_minutes(
 
         # Step 2: Generate unsigned PDF
         logger.info("🖨️ Step 2: Generating unsigned PDF")
+        with open("unsigned_output.pdf", "wb") as f:
+            HTML(string=modified_html).write_pdf(f)
         temp_pdf_path = "unsigned_output.pdf"
-        HTML(string=modified_html).write_pdf(temp_pdf_path)
 
         # Step 3: Load signing credentials
         logger.info("🔑 Step 3: Loading signing credentials")
@@ -63,11 +70,32 @@ async def signed_minutes(
 
         if pfx_file:
             pfx_data = await pfx_file.read()
-            signer = load_pyca_signer_from_pfx_data(
-                pfx_data=pfx_data,
-                passphrase=pfx_password.encode() if pfx_password else None,
+            # --- THIS IS THE CORRECT, ROBUST, LOW-LEVEL WAY TO LOAD PFX ---
+            private_key, cert, additional_certs = pkcs12.load_key_and_certificates(
+                data=pfx_data,
+                password=pfx_password.encode() if pfx_password else None,
+                backend=default_backend()
             )
+            
+            # Create a pyhanko-compatible certificate store
+            cert_store = SimpleCertificateStore()
+            pyhanko_cert = PyHankoCertificate.from_cryptography_certificate(cert)
+            cert_store.register(pyhanko_cert)
+            
+            # Register additional certificates (the chain) if they exist
+            if additional_certs:
+                for c in additional_certs:
+                    cert_store.register(PyHankoCertificate.from_cryptography_certificate(c))
+            
+            # Create the signer using the loaded objects
+            signer = signers.SimpleSigner(
+                signing_cert=pyhanko_cert,
+                signing_key=private_key,
+                cert_registry=cert_store
+            )
+
         elif cert_file and key_file:
+            # This logic remains the same as it was already working
             cert_data = await cert_file.read()
             key_data = await key_file.read()
             ca_chain_data = []
@@ -117,7 +145,5 @@ async def signed_minutes(
         logger.error(f"❌ Error signing PDF: {e}", exc_info=True)
         return JSONResponse(status_code=500, content={"error": str(e)})
     finally:
-        try:
+        if temp_pdf_path and os.path.exists(temp_pdf_path):
             os.remove(temp_pdf_path)
-        except OSError:
-            pass
