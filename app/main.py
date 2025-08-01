@@ -39,10 +39,6 @@ async def signed_minutes(
     chairperson_name: str = Form(..., description="Chairperson's full name"),
     pfx_file: UploadFile = File(None, description="Upload PKCS#12 (.pfx/.p12) file"),
     pfx_password: str = Form("", description="Password for the PFX file"),
-    cert_file: UploadFile = File(None, description="Upload PEM certificate file"),
-    key_file: UploadFile = File(None, description="Upload PEM private key file"),
-    key_password: str = Form("", description="Password for PEM private key"),
-    chain_files: List[UploadFile] = File([], description="Optional PEM CA certificates"),
 ):
     try:
         # Step 1: Read HTML and embed secretary/chair names
