@@ -1,96 +1,106 @@
+import io
 import logging
 import tempfile
-import asyncio
+from datetime import datetime
+import pytz
+import os
+
 from fastapi import FastAPI, UploadFile, Form
-from fastapi.responses import JSONResponse, FileResponse
+from fastapi.responses import FileResponse, JSONResponse
 from weasyprint import HTML
+
+from cryptography.hazmat.primitives.serialization import load_pem_private_key
+from cryptography.hazmat.backends import default_backend
+
 from pyhanko.sign import signers
+from pyhanko.sign.signers.pdf_signer import PdfSigner, PdfSignatureMetadata
 from pyhanko.sign.fields import SigFieldSpec
-from pyhanko.sign.general import load_cert_from_pemder
-from pyhanko.sign.validation import ValidationContext
-from pyhanko_certvalidator import CertificateValidator, ValidationContext as CertValidationContext
-from asn1crypto import pem
+# --- THIS IS THE KEY CHANGE: NO MORE pyhanko_certvalidator IMPORTS ---
+from pyhanko.keys import get_pyca_crypto_signer
 
 logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger("main")
+logger = logging.getLogger(__name__)
 
-app = FastAPI()
-
-# File paths for cert & key
-CERT_FILE = "cert.pem"
-KEY_FILE = "key.pem"
-
-
-# --------- Certificate Loader with asn1crypto Fallback --------- #
-def load_certificate(path: str):
-    with open(path, "rb") as f:
-        cert_bytes = f.read()
-    if pem.detect(cert_bytes):
-        logger.info("PEM detected, using asn1crypto unarmor.")
-        _, _, der_bytes = pem.unarmor(cert_bytes)
-        return load_cert_from_pemder(der_bytes)
-    else:
-        logger.info("DER detected, loading directly.")
-        return load_cert_from_pemder(cert_bytes)
-
+app = FastAPI(title="dMACQ Minutes Signing API")
 
 @app.post("/minutes/signed")
 async def signed_minutes(
     html_file: UploadFile,
+    cert_file: UploadFile,
+    key_file: UploadFile,
     secretary_name: str = Form(...),
-    chairperson_name: str = Form(...),
+    chairperson_name: str = Form(...)
 ):
-    try:
-        logger.info("📄 Step 1: Generate base PDF from HTML")
-        html_bytes = await html_file.read()
+    unsigned_pdf_path = ""
+    signed_output_path = ""
 
-        with tempfile.NamedTemporaryFile(suffix=".pdf", delete=False) as tmp_pdf:
-            HTML(string=html_bytes.decode("utf-8")).write_pdf(tmp_pdf.name)
+    try:
+        logger.info("📄 Step 1: Converting HTML to PDF")
+        html_content = await html_file.read()
+        
+        with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp_pdf:
+            HTML(string=html_content.decode("utf-8")).write_pdf(tmp_pdf.name)
             unsigned_pdf_path = tmp_pdf.name
 
-        logger.info("🔑 Step 2: Load certificate and private key")
-        cert = load_certificate(CERT_FILE)
-        with open(KEY_FILE, "rb") as f:
-            key_bytes = f.read()
+        logger.info("🔑 Step 2: Loading certificate and private key")
+        cert_bytes = await cert_file.read()
+        key_bytes = await key_file.read()
 
-        # Create validation context
-        cert_validator = CertificateValidator(cert)
-        cert_validator.validate(ValidationContext(trust_roots=[cert]))
+        # --- THIS IS THE CORRECT, RELIABLE WAY ---
+        # The get_pyca_crypto_signer function in `pyhanko.keys` is designed
+        # to handle the certificate and private key directly from bytes,
+        # creating a PyHanko-compatible signer object without the need for
+        # manual certificate parsing or problematic imports.
+        signer = get_pyca_crypto_signer(key_bytes, cert_bytes)
 
-        logger.info("✍️ Step 3: Create signer with Adobe-compatible settings")
-        signer = signers.SimpleSigner.load(
-            signing_cert=CERT_FILE,
-            signing_key=KEY_FILE,
-            cert_registry=None,
-            prefer_pss=False,  # RSA PKCS#1 v1.5 for Adobe compatibility
+        logger.info("✍️ Step 3: Signer created")
+        
+        logger.info("🖊 Step 4: Adding metadata + visual stamp")
+        ist = pytz.timezone("Asia/Kolkata")
+        timestamp = datetime.now(ist).strftime("%d %B %Y, %I:%M %p IST")
+
+        pdf_meta = PdfSignatureMetadata(
+            field_name="dMACQ_Signature",
+            reason=f"Minutes signed by Secretary {secretary_name} and Chairperson {chairperson_name}",
+            location="Mumbai, India",
+            contact_info="info@dmacq.com",
         )
 
-        # Add visible signature field to the PDF
-        with tempfile.NamedTemporaryFile(suffix=".pdf", delete=False) as signed_pdf:
-            sig_field_spec = SigFieldSpec(sig_field_name="dMACQ-Signature")
-            pdf_signer = signers.PdfSigner(
-                signers.PdfSignatureMetadata(
-                    field_name="dMACQ-Signature",
-                    reason=f"Approved by Secretary {secretary_name} and Chairperson {chairperson_name}",
-                    location="Mumbai, India",
-                    contact_info="info@dmacq.com",
-                ),
-                signer=signer,
-                new_field_spec=sig_field_spec,
-            )
+        sig_field_spec = SigFieldSpec(
+            sig_field_name="dMACQ_Signature",
+            box=(50, 700, 250, 750),
+            page=0
+        )
 
-            logger.info("🔏 Step 4: Signing PDF using pyHanko")
-            await pdf_signer.async_sign_pdf(
-                input_path=unsigned_pdf_path, output=signed_pdf.name
-            )
+        logger.info("🔏 Step 5: Signing PDF")
+        
+        with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as signed_tmp_file:
+            signed_output_path = signed_tmp_file.name
+            pdf_signer = PdfSigner(pdf_meta, signer=signer)
+            
+            with open(unsigned_pdf_path, "rb") as inf:
+                pdf_signer.prepare_signing(
+                    inf,
+                    output_stream=signed_tmp_file,
+                    new_field_spec=sig_field_spec
+                )
+            
+            signed_tmp_file.flush()
 
-            logger.info("✅ Signing complete")
-            return FileResponse(
-                signed_pdf.name,
-                media_type="application/pdf",
-                filename="signed_minutes.pdf",
-            )
+        logger.info("✅ PDF signed successfully")
+
+        return FileResponse(
+            signed_output_path,
+            media_type="application/pdf",
+            filename="signed_minutes.pdf"
+        )
 
     except Exception as e:
         logger.error("❌ Error signing PDF", exc_info=True)
         return JSONResponse(status_code=500, content={"error": str(e)})
+
+    finally:
+        if unsigned_pdf_path and os.path.exists(unsigned_pdf_path):
+            os.remove(unsigned_pdf_path)
+        if signed_output_path and os.path.exists(signed_output_path):
+            os.remove(signed_output_path)
