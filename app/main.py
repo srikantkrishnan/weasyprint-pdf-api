@@ -37,12 +37,12 @@ async def signed_minutes(
     html_file: UploadFile = File(..., description="HTML file for minutes"),
     secretary_name: str = Form(..., description="Secretary's full name"),
     chairperson_name: str = Form(..., description="Chairperson's full name"),
-    pfx_file: Optional[UploadFile] = File(default=None, description="PKCS#12 (.pfx/.p12) file containing cert+key"),
-    pfx_password: Optional[str] = Form(default="", description="Password for the PFX file"),
-    cert_file: Optional[UploadFile] = File(default=None, description="PEM certificate file"),
-    key_file: Optional[UploadFile] = File(default=None, description="PEM private key file"),
-    key_password: Optional[str] = Form(default="", description="Password for PEM private key"),
-    chain_files: Optional[List[UploadFile]] = File(default=None, description="Optional CA chain PEM certificates"),
+    pfx_file: Optional[UploadFile] = File(None, description="Upload PKCS#12 (.pfx/.p12) file containing cert+key"),
+    pfx_password: Optional[str] = Form("", description="Password for the PFX file"),
+    cert_file: Optional[UploadFile] = File(None, description="Upload PEM certificate file"),
+    key_file: Optional[UploadFile] = File(None, description="Upload PEM private key file"),
+    key_password: Optional[str] = Form("", description="Password for PEM private key"),
+    chain_files: Optional[List[UploadFile]] = File(None, description="Upload optional CA chain PEM certificates"),
 ):
     try:
         # Step 1: Read and modify HTML
@@ -70,11 +70,12 @@ async def signed_minutes(
             ca_chain_data = []
             if chain_files:
                 for cf in chain_files:
-                    ca_chain_data.append(await cf.read())
+                    if getattr(cf, "filename", None):  # ignore empty inputs
+                        ca_chain_data.append(await cf.read())
             signer = signers.SimpleSigner.load(
                 key_file=io.BytesIO(key_data),
                 cert_file=io.BytesIO(cert_data),
-                ca_chain_files=[io.BytesIO(c) for c in ca_chain_data],
+                ca_chain_files=[io.BytesIO(c) for c in ca_chain_data] if ca_chain_data else (),
                 key_passphrase=key_password.encode() if key_password else None,
             )
         else:
