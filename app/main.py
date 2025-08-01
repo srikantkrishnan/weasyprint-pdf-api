@@ -62,16 +62,6 @@ async def signed_minutes(
                 pfx_data,
                 passphrase=pfx_password.encode() if pfx_password else None,
             )
-        elif cert_file and key_file:
-            cert_data = await cert_file.read()
-            key_data = await key_file.read()
-            chain_data = [await cf.read() for cf in chain_files if getattr(cf, "filename", None)]
-            signer = signers.SimpleSigner.load(
-                key_data,
-                cert_data,
-                ca_chain=chain_data or (),
-                key_passphrase=key_password.encode() if key_password else None,
-            )
         else:
             raise HTTPException(status_code=400, detail="Either PFX or PEM cert+key must be provided")
 
