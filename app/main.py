@@ -41,12 +41,12 @@ async def signed_minutes(
     html_file: UploadFile = File(...),
     secretary_name: str = Form(...),
     chairperson_name: str = Form(...),
-    pfx_file: Optional[UploadFile] = File(None),
-    pfx_password: Optional[str] = Form(""),
-    cert_file: Optional[UploadFile] = File(None),
-    key_file: Optional[UploadFile] = File(None),
-    key_password: Optional[str] = Form(""),
-    chain_files: Optional[List[UploadFile]] = File(None)
+    pfx_file: Optional[UploadFile] = File(default=None, description="PKCS#12 file containing cert+key"),
+    pfx_password: Optional[str] = Form(default="", description="Password for PFX file"),
+    cert_file: Optional[UploadFile] = File(default=None, description="PEM certificate file"),
+    key_file: Optional[UploadFile] = File(default=None, description="PEM private key file"),
+    key_password: Optional[str] = Form(default="", description="Password for private key"),
+    chain_files: Optional[List[UploadFile]] = File(default=None, description="CA chain PEM certificates")
 ):
     try:
         # Normalize Swagger chain_files (avoid [''] errors)
