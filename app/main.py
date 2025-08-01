@@ -8,17 +8,16 @@ from fastapi import FastAPI, UploadFile, Form
 from fastapi.responses import FileResponse, JSONResponse
 from weasyprint import HTML
 
-# Re-importing cryptography libraries
 from cryptography.hazmat.primitives.serialization import load_pem_private_key
 from cryptography.hazmat.backends import default_backend
-from cryptography import x509
+# Note: We no longer need to import x509 from cryptography
 
 from pyhanko.sign import signers
 from pyhanko.sign.signers.pdf_signer import PdfSigner, PdfSignatureMetadata
 from pyhanko.sign.fields import SigFieldSpec
 from pyhanko_certvalidator.registry import SimpleCertificateStore
-
-# Removed the unused ValidationContext import
+# Import the helper function to load certificates in a pyhanko-compatible way
+from pyhanko_certvalidator.pem_parser import parse_pem_certificates
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -41,30 +40,28 @@ async def signed_minutes(
             HTML(string=html_content.decode("utf-8")).write_pdf(tmp_pdf.name)
             unsigned_pdf_path = tmp_pdf.name
 
-        # Step 2: Load certificates and private key using cryptography
+        # Step 2: Load certificates and private key
         logger.info("🔑 Step 2: Loading certificate and private key")
         cert_bytes = await cert_file.read()
         key_bytes = await key_file.read()
 
-        cert = x509.load_pem_x509_certificate(cert_bytes, default_backend())
+        # --- THIS IS THE CRITICAL CHANGE ---
+        # Use pyhanko's parser to load the certificate from PEM data
+        cert = parse_pem_certificates(cert_bytes)[0]
+        # Load the private key as before (pyhanko's signer can handle this)
         private_key = load_pem_private_key(key_bytes, password=None, backend=default_backend())
 
         # Step 3: Create signer using PyHanko's SimpleSigner
         logger.info("✍️ Step 3: Creating signer")
-
-        # --- THIS IS THE CRITICAL CHANGE ---
-        # 1. Create a certificate store
+        
+        # Create a certificate store and register the correctly-parsed cert
         cert_store = SimpleCertificateStore()
-        # 2. Register the certificate in the store
-        #    This is now safe because the SimpleSigner will use the cert_store,
-        #    which knows how to handle the certificate object correctly.
         cert_store.register(cert)
         
-        # 3. Pass the cert_store to the SimpleSigner constructor
         signer = signers.SimpleSigner(
             signing_cert=cert,
             signing_key=private_key,
-            cert_registry=cert_store  # <-- THIS WAS THE MISSING ARGUMENT
+            cert_registry=cert_store
         )
         
         # Step 4: Add metadata + visual stamp
@@ -81,8 +78,8 @@ async def signed_minutes(
 
         sig_field_spec = SigFieldSpec(
             sig_field_name="dMACQ_Signature",
-            box=(50, 700, 250, 750),  # Example coordinates: (x1, y1, x2, y2)
-            page=0  # Page number (0-indexed)
+            box=(50, 700, 250, 750),
+            page=0
         )
 
         # Step 5: Sign PDF
