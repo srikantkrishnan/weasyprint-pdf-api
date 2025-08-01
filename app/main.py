@@ -1,13 +1,15 @@
 import os
 import io
+import tempfile
 import logging
-from typing import Optional, List
+from typing import List, Optional
+
 from fastapi import FastAPI, File, Form, UploadFile, HTTPException
 from fastapi.responses import StreamingResponse, JSONResponse
 from weasyprint import HTML
 from pyhanko.sign import signers
-from pyhanko.pdf_utils.incremental_writer import IncrementalPdfFileWriter
 from pyhanko.sign.signers import PdfSignatureMetadata
+from pyhanko.pdf_utils.incremental_writer import IncrementalPdfFileWriter
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("main")
@@ -34,18 +36,24 @@ def embed_names_in_html(html_text, secretary_name, chair_name):
 
 @app.post("/minutes/signed")
 async def signed_minutes(
-    html_file: UploadFile = File(..., description="HTML file for minutes"),
-    secretary_name: str = Form(..., description="Secretary's full name"),
-    chairperson_name: str = Form(..., description="Chairperson's full name"),
-    pfx_file: UploadFile = File(default=None, description="Upload PKCS#12 (.pfx/.p12) file containing cert+key"),
-    pfx_password: str = Form(default="", description="Password for PFX file"),
-    cert_file: UploadFile = File(default=None, description="Upload PEM certificate file"),
-    key_file: UploadFile = File(default=None, description="Upload PEM private key file"),
-    key_password: str = Form(default="", description="Password for PEM private key"),
-    chain_files: List[UploadFile] = File(default=None, description="Upload CA chain PEM files (one or more)")
+    html_file: UploadFile = File(...),
+    secretary_name: str = Form(...),
+    chairperson_name: str = Form(...),
+    pfx_file: Optional[UploadFile] = File(None),
+    pfx_password: Optional[str] = Form(""),
+    cert_file: Optional[UploadFile] = File(None),
+    key_file: Optional[UploadFile] = File(None),
+    key_password: Optional[str] = Form(""),
+    chain_files: Optional[List[UploadFile]] = File(None),
 ):
+    # Normalize Swagger behavior for optional files
+    if chain_files:
+        chain_files = [cf for cf in chain_files if getattr(cf, "filename", None)]
+        if not chain_files:
+            chain_files = None
+
     try:
-        # Step 1: Read and modify HTML
+        # Step 1: Read HTML and embed secretary & chair names
         logger.info("📄 Step 1: Preparing HTML")
         html_bytes = await html_file.read()
         html_text = html_bytes.decode("utf-8")
@@ -53,39 +61,56 @@ async def signed_minutes(
 
         # Step 2: Generate unsigned PDF
         logger.info("🖨️ Step 2: Generating unsigned PDF")
-        temp_pdf_path = "unsigned_output.pdf"
-        HTML(string=modified_html).write_pdf(temp_pdf_path)
+        unsigned_pdf_bytes = HTML(string=modified_html).write_pdf()
 
-        # Step 3: Load signing credentials
+        # Step 3: Setup signing credentials
         logger.info("🔑 Step 3: Loading signing credentials")
         signer = None
 
         if pfx_file:
             pfx_data = await pfx_file.read()
             signer = signers.SimpleSigner.load_pkcs12(
-                io.BytesIO(pfx_data),
-                passphrase=pfx_password.encode() if pfx_password else None,
+                pfx_data,
+                passphrase=pfx_password.encode() if pfx_password else None
             )
         elif cert_file and key_file:
             cert_data = await cert_file.read()
             key_data = await key_file.read()
-            ca_chain_data = []
-            if chain_files:
-                for cf in chain_files:
-                    if getattr(cf, "filename", None):
-                        ca_chain_data.append(await cf.read())
+            chain_data = [await cf.read() for cf in chain_files] if chain_files else []
 
-            signer = signers.SimpleSigner.load(
-                key_file=io.BytesIO(key_data),
-                cert_file=io.BytesIO(cert_data),
-                ca_chain_files=[io.BytesIO(c) for c in ca_chain_data] if ca_chain_data else (),
-                key_passphrase=key_password.encode() if key_password else None,
-            )
-        else:
-            raise HTTPException(status_code=400, detail="Either PFX or PEM cert+key must be provided")
+            # Write cert/key/chain into temp files for PyHanko
+            with tempfile.NamedTemporaryFile(delete=False) as cert_tmp, \
+                 tempfile.NamedTemporaryFile(delete=False) as key_tmp:
+                cert_tmp.write(cert_data)
+                key_tmp.write(key_data)
+                cert_tmp.flush()
+                key_tmp.flush()
 
-        # Step 4: Configure signature metadata
-        logger.info("📝 Step 4: Configuring signature metadata")
+                chain_paths = []
+                for c in chain_data:
+                    with tempfile.NamedTemporaryFile(delete=False) as chain_tmp:
+                        chain_tmp.write(c)
+                        chain_tmp.flush()
+                        chain_paths.append(chain_tmp.name)
+
+                signer = signers.SimpleSigner.load(
+                    key_file=key_tmp.name,
+                    cert_file=cert_tmp.name,
+                    ca_chain_files=chain_paths,
+                    key_passphrase=key_password.encode() if key_password else None
+                )
+
+                # Cleanup after signer is initialized
+                os.unlink(cert_tmp.name)
+                os.unlink(key_tmp.name)
+                for cp in chain_paths:
+                    os.unlink(cp)
+
+        if not signer:
+            raise HTTPException(status_code=400, detail="No valid signing credentials provided.")
+
+        # Step 4: Apply digital signature
+        logger.info("✍️ Step 4: Signing PDF")
         signature_meta = PdfSignatureMetadata(
             field_name="Signature",
             reason="Document digitally signed by Company Secretary",
@@ -93,17 +118,16 @@ async def signed_minutes(
             contact_info="info@dmacq.com",
         )
 
-        # Step 5: Apply signature
-        logger.info("✍️ Step 5: Signing PDF")
         signed_buf = io.BytesIO()
-        with open(temp_pdf_path, "rb") as unsigned_pdf:
-            pdf_writer = IncrementalPdfFileWriter(unsigned_pdf)
-            signers.sign_pdf(
-                pdf_writer,
-                signature_meta,
-                signer=signer,
-                output=signed_buf,
-            )
+        unsigned_buf = io.BytesIO(unsigned_pdf_bytes)
+        pdf_writer = IncrementalPdfFileWriter(unsigned_buf)
+
+        signers.sign_pdf(
+            pdf_writer,
+            signature_meta,
+            signer=signer,
+            output=signed_buf
+        )
 
         signed_buf.seek(0)
         return StreamingResponse(
@@ -115,8 +139,3 @@ async def signed_minutes(
     except Exception as e:
         logger.error(f"❌ Error signing PDF: {e}", exc_info=True)
         return JSONResponse(status_code=500, content={"error": str(e)})
-    finally:
-        try:
-            os.remove(temp_pdf_path)
-        except OSError:
-            pass
