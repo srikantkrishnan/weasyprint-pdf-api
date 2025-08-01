@@ -9,6 +9,9 @@ from pyhanko.sign import signers
 from pyhanko.pdf_utils.incremental_writer import IncrementalPdfFileWriter
 from pyhanko.sign.signers import PdfSignatureMetadata
 from pyhanko.sign.timestamps import HTTPTimeStamper
+from pyhanko.sign.fields import SigFieldSpec
+from pyhanko.sign.appearance import SimpleTextStampStyle, PdfAppearConfig
+from pyhanko.pdf_utils.layout import BoxConstraints
 from datetime import datetime
 
 # Persistent storage paths
@@ -16,9 +19,10 @@ PERSIST_DIR = "/var/data"
 os.makedirs(PERSIST_DIR, exist_ok=True)
 
 CERT_PATH = os.path.join(PERSIST_DIR, "dmacq_signer.pfx")
+LOGO_PATH = os.path.join(PERSIST_DIR, "dMACQ_logo.png")
 AUDIT_LOG_FILE = os.path.join(PERSIST_DIR, "signing_audit.log")
 
-# Logging setup (console + file)
+# Logging setup
 logger = logging.getLogger("main")
 logger.setLevel(logging.DEBUG)
 formatter = logging.Formatter("%(asctime)s [%(levelname)s] %(message)s")
@@ -33,31 +37,33 @@ logger.addHandler(file_handler)
 
 app = FastAPI(title="dMACQ Minutes Signing API")
 
-# Trusted timestamp server (DigiCert RFC 3161 TSA)
+# Timestamp server
 TSA_URL = "http://timestamp.digicert.com"
 timestamper = HTTPTimeStamper(TSA_URL)
 
 
-def embed_names_in_html(html_text, secretary_name, chair_name):
-    insert_text = (
-        f"<p><strong>Chair: </strong>{chair_name}<br>"
-        f"<strong>Secretary: </strong>{secretary_name}</p>\n"
-    )
+def embed_date_in_html(html_text, approval_datetime):
+    """Embed Date of Approval dynamically in the HTML."""
+    insert_text = f"<p><strong>Date of Approval: </strong>{approval_datetime}</p>\n"
     lowered = html_text.lower()
-    if "</body>" in lowered:
-        pos = lowered.rfind("</body>")
-        html_text = html_text[:pos] + insert_text + html_text[pos:]
-    elif "</html>" in lowered:
-        pos = lowered.rfind("</html>")
-        html_text = html_text[:pos] + insert_text + html_text[pos:]
+    if "date of approval" in lowered:
+        # Replace placeholder if exists
+        html_text = html_text.replace("Date of Approval", f"Date of Approval: {approval_datetime}")
     else:
-        html_text += "\n" + insert_text
+        # If placeholder missing, append at end
+        if "</body>" in lowered:
+            pos = lowered.rfind("</body>")
+            html_text = html_text[:pos] + insert_text + html_text[pos:]
+        elif "</html>" in lowered:
+            pos = lowered.rfind("</html>")
+            html_text = html_text[:pos] + insert_text + html_text[pos:]
+        else:
+            html_text += "\n" + insert_text
     return html_text
 
 
 @app.post("/upload-cert")
 async def upload_cert(pfx_file: UploadFile = File(...)):
-    """Upload the PFX cert. Password must be set in Render Environment as PFX_PASSWORD."""
     try:
         with open(CERT_PATH, "wb") as f:
             f.write(await pfx_file.read())
@@ -70,10 +76,24 @@ async def upload_cert(pfx_file: UploadFile = File(...)):
         raise HTTPException(status_code=500, detail=error_msg)
 
 
+@app.post("/upload-logo")
+async def upload_logo(logo_file: UploadFile = File(...)):
+    try:
+        with open(LOGO_PATH, "wb") as f:
+            f.write(await logo_file.read())
+        msg = "Logo uploaded successfully"
+        logger.info(f"✅ {msg}")
+        return {"message": msg}
+    except Exception as e:
+        error_msg = f"❌ Error uploading logo: {e}"
+        logger.error(error_msg, exc_info=True)
+        raise HTTPException(status_code=500, detail=error_msg)
+
+
 @app.get("/cert/status")
 async def cert_status():
-    """Check if cert + password are valid and show certificate info."""
     cert_exists = os.path.exists(CERT_PATH)
+    logo_exists = os.path.exists(LOGO_PATH)
     password_set = bool(os.environ.get("PFX_PASSWORD"))
     valid_cert = False
     error_message = None
@@ -94,12 +114,13 @@ async def cert_status():
 
     return {
         "cert_exists": cert_exists,
+        "logo_exists": logo_exists,
         "password_set": password_set,
         "valid_cert": valid_cert,
         "cert_subject": cert_subject,
         "error": error_message,
         "audit_log": AUDIT_LOG_FILE,
-        "timestamper_url": TSA_URL
+        "timestamper_url": TSA_URL,
     }
 
 
@@ -109,26 +130,30 @@ async def signed_minutes(
     secretary_name: str = Form(...),
     chairperson_name: str = Form(...),
 ):
+    approval_datetime = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     return await process_signing((await html_file.read()).decode("utf-8"),
-                                 secretary_name, chairperson_name)
+                                 secretary_name, chairperson_name, approval_datetime)
 
 
 @app.get("/debug/sign")
 async def debug_sign():
-    """Diagnostic endpoint: sign a static test HTML string"""
     logger.info("🚦 Debug signing test triggered")
     test_html = """
     <html>
     <body>
         <h1>Board Meeting Minutes</h1>
         <p>This is a test document generated for signing diagnostics.</p>
+        <p>Secretary/Minute Taker</p>
+        <p>Chairperson/Meeting Leader</p>
+        <p>Date of Approval</p>
     </body>
     </html>
     """
-    return await process_signing(test_html, "Test Secretary", "Test Chairperson")
+    approval_datetime = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    return await process_signing(test_html, "Test Secretary", "Test Chairperson", approval_datetime)
 
 
-async def process_signing(html_text: str, secretary_name: str, chairperson_name: str):
+async def process_signing(html_text: str, secretary_name: str, chairperson_name: str, approval_datetime: str):
     temp_pdf_path = os.path.join(PERSIST_DIR, "unsigned_output.pdf")
     try:
         if not os.path.exists(CERT_PATH):
@@ -138,7 +163,7 @@ async def process_signing(html_text: str, secretary_name: str, chairperson_name:
             raise HTTPException(status_code=400, detail="PFX_PASSWORD not set in Render Environment")
 
         logger.info("📄 Preparing HTML")
-        modified_html = embed_names_in_html(html_text, secretary_name, chairperson_name)
+        modified_html = embed_date_in_html(html_text, approval_datetime)
 
         logger.info("🖨️ Generating PDF with WeasyPrint")
         HTML(string=modified_html).write_pdf(temp_pdf_path)
@@ -148,24 +173,56 @@ async def process_signing(html_text: str, secretary_name: str, chairperson_name:
         signer = signers.SimpleSigner.load_pkcs12(CERT_PATH, passphrase=cert_pass)
         logger.info("✅ Signer loaded successfully")
 
-        logger.info("✍️ Signing PDF with TSA timestamp using run_in_executor")
+        logger.info("✍️ Adding Secretary + Chair visible signatures")
         signed_buf = io.BytesIO()
 
         def blocking_sign():
             with open(temp_pdf_path, "rb") as unsigned_pdf:
                 pdf_writer = IncrementalPdfFileWriter(unsigned_pdf)
+
+                # Secretary signature field
+                sec_sig = SigFieldSpec(
+                    sig_field_name="SecretarySig",
+                    on_page=-1,  # last page
+                    box=(100, 250, 350, 300),  # adjust coordinates
+                )
+                sec_sig.apply(pdf_writer)
+
+                # Chairperson signature field
+                chair_sig = SigFieldSpec(
+                    sig_field_name="ChairSig",
+                    on_page=-1,
+                    box=(100, 180, 350, 230),  # adjust coordinates
+                )
+                chair_sig.apply(pdf_writer)
+
+                # Appearance style
+                stamp_style_secretary = SimpleTextStampStyle(
+                    stamp_text=f"Digitally signed by {secretary_name}\nRole: Secretary\nDate: {approval_datetime}",
+                    background=LOGO_PATH if os.path.exists(LOGO_PATH) else None,
+                    text_box_style=BoxConstraints(width=240, height=100),
+                )
+                stamp_style_chair = SimpleTextStampStyle(
+                    stamp_text=f"Digitally signed by {chairperson_name}\nRole: Chairperson\nDate: {approval_datetime}",
+                    background=LOGO_PATH if os.path.exists(LOGO_PATH) else None,
+                    text_box_style=BoxConstraints(width=240, height=100),
+                )
+
+                # Sign with Chair signature (main signer)
                 signers.sign_pdf(
                     pdf_writer,
                     PdfSignatureMetadata(
-                        field_name="Signature1",
+                        field_name="ChairSig",
                         reason="Digitally signed board minutes",
                         location="dMACQ Software Pvt Ltd, Mumbai, India",
                         contact_info="info@dmacq.com",
                     ),
                     signer=signer,
-                    timestamper=timestamper,  # add trusted timestamp
+                    timestamper=timestamper,
+                    appearance_config=PdfAppearConfig(stamp_style=stamp_style_chair),
                     output=signed_buf,
                 )
+
             signed_buf.seek(0)
             return signed_buf
 
