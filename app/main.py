@@ -22,24 +22,20 @@ logger = logging.getLogger("main")
 logger.setLevel(logging.DEBUG)
 formatter = logging.Formatter("%(asctime)s [%(levelname)s] %(message)s")
 
-# Console handler
 console_handler = logging.StreamHandler()
 console_handler.setFormatter(formatter)
 logger.addHandler(console_handler)
 
-# File handler (audit log)
 file_handler = logging.FileHandler(AUDIT_LOG_FILE)
 file_handler.setFormatter(formatter)
 logger.addHandler(file_handler)
 
 app = FastAPI(title="dMACQ Minutes Signing API")
 
-# Path to stored PFX cert
 CERT_PATH = os.path.join(PERSIST_DIR, "dmacq_signer.pfx")
 
 
 def embed_names_in_html(html_text, secretary_name, chair_name):
-    """Embed secretary and chairperson names into the HTML content."""
     insert_text = (
         f"<p><strong>Chair: </strong>{chair_name}<br>"
         f"<strong>Secretary: </strong>{secretary_name}</p>\n"
@@ -85,36 +81,58 @@ async def signed_minutes(
     secretary_name: str = Form(...),
     chairperson_name: str = Form(...),
 ):
+    return await process_signing(html_text=(await html_file.read()).decode("utf-8"),
+                                 secretary_name=secretary_name,
+                                 chairperson_name=chairperson_name)
+
+
+@app.get("/debug/sign")
+async def debug_sign():
+    """Diagnostic endpoint: sign a static test HTML string"""
+    logger.info("🚦 Debug signing test triggered")
+    test_html = """
+    <html>
+    <body>
+        <h1>Board Meeting Minutes</h1>
+        <p>This is a test document generated for signing diagnostics.</p>
+    </body>
+    </html>
+    """
+    return await process_signing(html_text=test_html,
+                                 secretary_name="Test Secretary",
+                                 chairperson_name="Test Chairperson")
+
+
+async def process_signing(html_text: str, secretary_name: str, chairperson_name: str):
     temp_pdf_path = os.path.join(PERSIST_DIR, "unsigned_output.pdf")
 
     try:
-        # Step 1: Validate cert
+        # Step 1: Check certificate
         if not os.path.exists(CERT_PATH):
             raise HTTPException(status_code=400, detail="No certificate uploaded. Use /upload-cert first.")
         cert_pass = os.environ.get("PFX_PASSWORD", "").encode()
         if not cert_pass:
             raise HTTPException(status_code=400, detail="Certificate password not set. Please re-upload cert.")
 
-        # Step 2: Convert HTML → PDF
-        logger.info("📄 Step 1: Reading and modifying HTML")
-        html_bytes = await html_file.read()
-        html_text = html_bytes.decode("utf-8")
+        # Step 2: Embed names
+        logger.info("📄 Preparing HTML")
         modified_html = embed_names_in_html(html_text, secretary_name, chairperson_name)
 
-        logger.info("🖨️ Step 2: Generating PDF with WeasyPrint")
+        # Step 3: Generate unsigned PDF
+        logger.info("🖨️ Generating PDF with WeasyPrint")
         HTML(string=modified_html).write_pdf(temp_pdf_path)
         logger.info(f"✅ Unsigned PDF written at {temp_pdf_path}")
 
-        # Step 3: Load signer
-        logger.info("🔑 Step 3: Loading signing credentials from PFX")
+        # Step 4: Load signer
+        logger.info("🔑 Loading signing credentials from PFX")
         signer = signers.SimpleSigner.load_pkcs12(
             pfx_file=CERT_PATH,
             passphrase=cert_pass
         )
         logger.info("✅ Signer loaded successfully")
 
-        # Step 4: Sign PDF (threaded to avoid asyncio.run issue)
-        logger.info("✍️ Step 4: Signing PDF using run_in_executor")
+        # Step 5: Sign PDF in thread
+        logger.info("✍️ Signing PDF using run_in_executor")
         signed_buf = io.BytesIO()
 
         def blocking_sign():
@@ -126,6 +144,8 @@ async def signed_minutes(
                         reason="Digitally signed board minutes",
                         location="dMACQ Software Pvt Ltd, Mumbai, India",
                         contact_info="info@dmacq.com",
+                        field_name=None,
+                        existing_fields_only=False,
                     ),
                     signer=signer,
                     output=signed_buf,
@@ -160,13 +180,11 @@ async def signed_minutes(
 
 @app.get("/cert/status")
 async def cert_status():
-    """Check if cert and password are available"""
-    status = {
+    return {
         "cert_exists": os.path.exists(CERT_PATH),
         "password_set": bool(os.environ.get("PFX_PASSWORD")),
         "audit_log": AUDIT_LOG_FILE,
     }
-    return status
 
 
 @app.get("/health")
