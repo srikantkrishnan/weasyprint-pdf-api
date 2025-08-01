@@ -2,7 +2,7 @@ import os
 import io
 import logging
 import asyncio
-from fastapi import FastAPI, File, Form, UploadFile, HTTPException, Query
+from fastapi import FastAPI, File, Form, UploadFile, HTTPException
 from fastapi.responses import StreamingResponse, JSONResponse
 from weasyprint import HTML
 from pyhanko.sign import signers
@@ -16,7 +16,6 @@ PERSIST_DIR = "/var/data"
 os.makedirs(PERSIST_DIR, exist_ok=True)
 
 CERT_PATH = os.path.join(PERSIST_DIR, "dmacq_signer.pfx")
-LOGO_PATH = os.path.join(PERSIST_DIR, "dMACQ_logo.png")
 AUDIT_LOG_FILE = os.path.join(PERSIST_DIR, "signing_audit.log")
 
 # Logging setup
@@ -39,66 +38,6 @@ TSA_URL = "http://timestamp.digicert.com"
 timestamper = HTTPTimeStamper(TSA_URL)
 
 
-def embed_watermark_in_html(html_text, secretary_name, chair_name, approval_datetime, logo_size: int = 120):
-    """Embed watermark only on the last page, with dynamic logo size."""
-    logo_html = ""
-    if os.path.exists(LOGO_PATH):
-        logo_html = f'''
-        <img src="file://{LOGO_PATH}"
-             style="display:block;
-                    margin:0 auto;
-                    opacity:0.15;
-                    max-width:{logo_size}px;
-                    height:auto;" />
-        '''
-
-    watermark_css = """
-    <style>
-    @page:last {
-        @bottom-center {
-            content: element(watermark);
-        }
-    }
-    #watermark {
-        display: block;
-        text-align: center;
-        opacity: 0.7;
-        font-size: 12px;
-        color: #333;
-    }
-    </style>
-    """
-
-    watermark_div = f"""
-    <div id="watermark">
-        {logo_html}
-        <p><strong>Digitally signed</strong></p>
-        <p>Chairperson: {chair_name}</p>
-        <p>Secretary: {secretary_name}</p>
-        <p>Date of Approval: {approval_datetime}</p>
-        <p><em>dMACQ Board Minutes System</em></p>
-    </div>
-    """
-
-    lowered = html_text.lower()
-    if "</head>" in lowered:
-        pos = lowered.rfind("</head>")
-        html_text = html_text[:pos] + watermark_css + html_text[pos:]
-    else:
-        html_text = "<head>" + watermark_css + "</head>" + html_text
-
-    if "</body>" in lowered:
-        pos = lowered.rfind("</body>")
-        html_text = html_text[:pos] + watermark_div + html_text[pos:]
-    elif "</html>" in lowered:
-        pos = lowered.rfind("</html>")
-        html_text = html_text[:pos] + watermark_div + html_text[pos:]
-    else:
-        html_text += watermark_div
-
-    return html_text
-
-
 @app.post("/upload-cert")
 async def upload_cert(pfx_file: UploadFile = File(...)):
     try:
@@ -113,24 +52,9 @@ async def upload_cert(pfx_file: UploadFile = File(...)):
         raise HTTPException(status_code=500, detail=error_msg)
 
 
-@app.post("/upload-logo")
-async def upload_logo(logo_file: UploadFile = File(...)):
-    try:
-        with open(LOGO_PATH, "wb") as f:
-            f.write(await logo_file.read())
-        msg = "Logo uploaded successfully"
-        logger.info(f"✅ {msg}")
-        return {"message": msg}
-    except Exception as e:
-        error_msg = f"❌ Error uploading logo: {e}"
-        logger.error(error_msg, exc_info=True)
-        raise HTTPException(status_code=500, detail=error_msg)
-
-
 @app.get("/cert/status")
 async def cert_status():
     cert_exists = os.path.exists(CERT_PATH)
-    logo_exists = os.path.exists(LOGO_PATH)
     password_set = bool(os.environ.get("PFX_PASSWORD"))
     valid_cert = False
     error_message = None
@@ -151,7 +75,6 @@ async def cert_status():
 
     return {
         "cert_exists": cert_exists,
-        "logo_exists": logo_exists,
         "password_set": password_set,
         "valid_cert": valid_cert,
         "cert_subject": cert_subject,
@@ -166,48 +89,14 @@ async def signed_minutes(
     html_file: UploadFile = File(...),
     secretary_name: str = Form(...),
     chairperson_name: str = Form(...),
-    logo_size: int = Form(120)
 ):
     approval_datetime = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    return await process_signing((await html_file.read()).decode("utf-8"),
-                                 secretary_name, chairperson_name, approval_datetime, logo_size)
-
-
-@app.post("/preview-watermark")
-async def preview_watermark(
-    html_file: UploadFile = File(...),
-    secretary_name: str = Form(...),
-    chairperson_name: str = Form(...),
-    logo_size: int = Form(120)
-):
-    """Generate a PDF with watermark only (no signing)."""
-    approval_datetime = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    temp_pdf_path = os.path.join(PERSIST_DIR, "preview_output.pdf")
-
-    try:
-        logger.info(f"👀 Generating preview PDF with watermark, logo_size={logo_size}")
-        modified_html = embed_watermark_in_html(
-            (await html_file.read()).decode("utf-8"),
-            secretary_name, chairperson_name, approval_datetime, logo_size
-        )
-        HTML(string=modified_html).write_pdf(temp_pdf_path)
-
-        return StreamingResponse(
-            open(temp_pdf_path, "rb"),
-            media_type="application/pdf",
-            headers={"Content-Disposition": "attachment; filename=preview_minutes.pdf"},
-        )
-    except Exception as e:
-        error_msg = f"❌ Error generating preview: {e}"
-        logger.error(error_msg, exc_info=True)
-        return JSONResponse(status_code=500, content={"error": str(e)})
-    finally:
-        if os.path.exists(temp_pdf_path):
-            try:
-                os.remove(temp_pdf_path)
-                logger.info(f"🗑️ Temp file {temp_pdf_path} deleted after preview")
-            except OSError:
-                pass
+    return await process_signing(
+        (await html_file.read()).decode("utf-8"),
+        secretary_name,
+        chairperson_name,
+        approval_datetime
+    )
 
 
 @app.get("/debug/sign")
@@ -222,10 +111,10 @@ async def debug_sign():
     </html>
     """
     approval_datetime = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    return await process_signing(test_html, "Test Secretary", "Test Chairperson", approval_datetime, 120)
+    return await process_signing(test_html, "Test Secretary", "Test Chairperson", approval_datetime)
 
 
-async def process_signing(html_text: str, secretary_name: str, chairperson_name: str, approval_datetime: str, logo_size: int):
+async def process_signing(html_text: str, secretary_name: str, chairperson_name: str, approval_datetime: str):
     temp_pdf_path = os.path.join(PERSIST_DIR, "unsigned_output.pdf")
     try:
         if not os.path.exists(CERT_PATH):
@@ -234,11 +123,8 @@ async def process_signing(html_text: str, secretary_name: str, chairperson_name:
         if not cert_pass:
             raise HTTPException(status_code=400, detail="PFX_PASSWORD not set in Render Environment")
 
-        logger.info("📄 Embedding watermark into HTML (last page only)")
-        modified_html = embed_watermark_in_html(html_text, secretary_name, chairperson_name, approval_datetime, logo_size)
-
         logger.info("🖨️ Generating PDF with WeasyPrint")
-        HTML(string=modified_html).write_pdf(temp_pdf_path)
+        HTML(string=html_text).write_pdf(temp_pdf_path)
         logger.info(f"✅ Unsigned PDF written at {temp_pdf_path}")
 
         logger.info("🔑 Loading signing credentials from PFX")
