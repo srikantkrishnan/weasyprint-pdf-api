@@ -25,7 +25,7 @@ typing-extensions==4.14.1
 uvloop==0.21.0
 watchfiles==1.1.0
 
-# File uploads / forms
+# For PEM/PFX handling
 python-multipart==0.0.20
 pyyaml==6.0.2
 
