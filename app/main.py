@@ -1,7 +1,8 @@
 import os
 import io
 import logging
-from fastapi import FastAPI, File, Form, UploadFile
+from typing import Optional, List
+from fastapi import FastAPI, File, Form, UploadFile, HTTPException
 from fastapi.responses import StreamingResponse, JSONResponse
 from weasyprint import HTML
 from pyhanko.sign import signers
@@ -37,24 +38,28 @@ def embed_names_in_html(html_text, secretary_name, chair_name):
 
 @app.post("/minutes/signed")
 async def signed_minutes(
-    html_file: UploadFile = File(..., description="HTML file for minutes"),
-    secretary_name: str = Form(..., description="Secretary full name"),
-    chair_name: str = Form(..., description="Chairperson full name"),
-    # Option 1: PKCS#12 bundle
-    pfx_file: UploadFile = File(None, description="PFX file containing cert+key"),
-    pfx_password: str = Form("", description="PFX password"),
-    # Option 2: PEM certs
-    cert_file: UploadFile = File(None, description="PEM certificate"),
-    key_file: UploadFile = File(None, description="PEM private key"),
-    key_password: str = Form("", description="PEM key password"),
-    chain_files: list[UploadFile] = None
+    html_file: UploadFile = File(...),
+    secretary_name: str = Form(...),
+    chairperson_name: str = Form(...),
+    pfx_file: Optional[UploadFile] = File(None),
+    pfx_password: Optional[str] = Form(""),
+    cert_file: Optional[UploadFile] = File(None),
+    key_file: Optional[UploadFile] = File(None),
+    key_password: Optional[str] = Form(""),
+    chain_files: Optional[List[UploadFile]] = File(None)
 ):
     try:
+        # Normalize Swagger chain_files (avoid [''] errors)
+        if chain_files:
+            chain_files = [cf for cf in chain_files if getattr(cf, "filename", None)]
+            if not chain_files:
+                chain_files = None
+
         # Step 1: Read HTML and embed names
         logger.info("📄 Step 1: Preparing HTML")
         html_bytes = await html_file.read()
         html_text = html_bytes.decode("utf-8")
-        modified_html = embed_names_in_html(html_text, secretary_name, chair_name)
+        modified_html = embed_names_in_html(html_text, secretary_name, chairperson_name)
 
         # Step 2: Generate unsigned PDF
         logger.info("🖨️ Step 2: Generating unsigned PDF")
@@ -66,7 +71,7 @@ async def signed_minutes(
         if pfx_file:
             pfx_data = await pfx_file.read()
             signer = signers.SimpleSigner.load_pkcs12(
-                pfx_file=io.BytesIO(pfx_data),
+                io.BytesIO(pfx_data),
                 passphrase=pfx_password.encode() if pfx_password else None
             )
         elif cert_file and key_file:
@@ -84,7 +89,7 @@ async def signed_minutes(
                 key_passphrase=key_password.encode() if key_password else None
             )
         else:
-            return JSONResponse(status_code=400, content={"error": "No signing credentials provided"})
+            raise HTTPException(status_code=400, detail="No signing credentials provided")
 
         # Step 4: Configure metadata
         signature_meta = PdfSignatureMetadata(
