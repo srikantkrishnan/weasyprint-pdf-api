@@ -1,70 +1,86 @@
-import subprocess
+import io
+import logging
 import tempfile
+import subprocess
 from fastapi import FastAPI, UploadFile, Form
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, JSONResponse
 from weasyprint import HTML
-import fitz  # PyMuPDF
+import pikepdf
+from datetime import datetime
 
-app = FastAPI(title="Minutes Signing API (OpenSSL Auto-Cert)")
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+
+app = FastAPI(title="WeasyPrint OpenSSL Signing API")
 
 @app.post("/minutes/signed")
 async def sign_minutes(
     html_file: UploadFile,
-    secretary_name: str = Form(...),
-    chairperson_name: str = Form(...),
-    secretary_timestamp: str = Form(...),
-    chairperson_timestamp: str = Form(...),
+    cert_file: UploadFile,
+    key_file: UploadFile,
+    signer_name: str = Form("Secretary"),
+    signer_email: str = Form("info@dmacq.com")
 ):
     try:
-        # Step 1: Convert HTML → PDF
-        pdf_path = tempfile.NamedTemporaryFile(delete=False, suffix=".pdf").name
-        HTML(file_obj=html_file.file).write_pdf(pdf_path)
+        logger.info("📄 Step 1: Generating unsigned PDF from HTML")
+        html_content = await html_file.read()
+        cert_bytes = await cert_file.read()
+        key_bytes = await key_file.read()
 
-        # Step 2: Add Secretary & Chairperson stamps on the LAST PAGE
-        doc = fitz.open(pdf_path)
-        page = doc[-1]  # last page
-        page.insert_text((72, 700), f"Secretary: {secretary_name}", fontsize=11)
-        page.insert_text((72, 720), f"Signed at: {secretary_timestamp}", fontsize=9)
-        page.insert_text((300, 700), f"Chairperson: {chairperson_name}", fontsize=11)
-        page.insert_text((300, 720), f"Signed at: {chairperson_timestamp}", fontsize=9)
+        # Save unsigned PDF
+        with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp_pdf:
+            HTML(string=html_content.decode("utf-8")).write_pdf(tmp_pdf.name)
+            unsigned_pdf_path = tmp_pdf.name
 
-        stamped_pdf_path = tempfile.NamedTemporaryFile(delete=False, suffix=".pdf").name
-        doc.save(stamped_pdf_path)
-        doc.close()
+        # Save cert & key to temp files
+        with tempfile.NamedTemporaryFile(delete=False, suffix=".pem") as cert_tmp:
+            cert_tmp.write(cert_bytes)
+            cert_path = cert_tmp.name
+        with tempfile.NamedTemporaryFile(delete=False, suffix=".pem") as key_tmp:
+            key_tmp.write(key_bytes)
+            key_path = key_tmp.name
 
-        # Step 3: Generate a fresh OpenSSL certificate + key (auto-expiry 1 year)
-        cert_path = tempfile.NamedTemporaryFile(delete=False, suffix=".pem").name
-        key_path = tempfile.NamedTemporaryFile(delete=False, suffix=".pem").name
-        subj = "/C=IN/ST=Maharashtra/L=Mumbai/O=dMACQ/OU=Tech/CN=DMACQ/emailAddress=info@dmacq.com"
-
-        subprocess.run([
-            "openssl", "req", "-x509", "-newkey", "rsa:2048",
-            "-keyout", key_path, "-out", cert_path,
-            "-days", "365", "-nodes",
-            "-subj", subj
-        ], check=True)
-
-        # Step 4: Digitally sign PDF using OpenSSL smime
+        logger.info("🔏 Step 2: Applying OpenSSL digital signature")
         signed_pdf_path = tempfile.NamedTemporaryFile(delete=False, suffix=".pdf").name
-        subprocess.run([
+
+        # OpenSSL smime signing (binary DER, attach signature inside PDF)
+        cmd = [
             "openssl", "smime", "-sign",
-            "-in", stamped_pdf_path,
+            "-binary", "-in", unsigned_pdf_path,
             "-signer", cert_path,
             "-inkey", key_path,
-            "-outform", "DER",
-            "-out", signed_pdf_path,
-            "-nodetach"
-        ], check=True)
+            "-outform", "DER", "-out", signed_pdf_path
+        ]
+        subprocess.run(cmd, check=True)
 
+        logger.info("🖊️ Step 3: Adding visual signature stamp")
+        with pikepdf.open(unsigned_pdf_path) as pdf:
+            page = pdf.pages[0]
+            timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            note = f"Signed by {signer_name} ({signer_email}) on {timestamp}"
+
+            # Add annotation (visible text stamp)
+            page.add_text_annot(
+                rect=pikepdf.Rect(50, 50, 400, 100),
+                text=note
+            )
+
+            pdf.save(signed_pdf_path)
+
+        logger.info("✅ PDF signed successfully")
         return FileResponse(
             signed_pdf_path,
             media_type="application/pdf",
             filename="signed_minutes.pdf"
         )
 
+    except subprocess.CalledProcessError as se:
+        logger.error(f"OpenSSL signing failed: {se}")
+        return JSONResponse(status_code=500, content={"error": f"OpenSSL signing failed: {str(se)}"})
     except Exception as e:
-        return {"error": str(e)}
+        logger.error("❌ Error signing PDF", exc_info=True)
+        return JSONResponse(status_code=500, content={"error": str(e)})
 
 @app.get("/")
 def root():
-    return {"message": "Minutes Signing API with OpenSSL is running 🚀"}
+    return {"message": "WeasyPrint OpenSSL Signing API is running 🚀"}
