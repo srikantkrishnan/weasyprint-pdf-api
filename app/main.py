@@ -8,6 +8,7 @@ from weasyprint import HTML
 from pyhanko.sign import signers
 from pyhanko.pdf_utils.incremental_writer import IncrementalPdfFileWriter
 from pyhanko.sign.signers import PdfSignatureMetadata
+from pyhanko.sign.timestamps import HTTPTimeStamper
 from datetime import datetime
 
 # Persistent storage paths
@@ -31,6 +32,10 @@ file_handler.setFormatter(formatter)
 logger.addHandler(file_handler)
 
 app = FastAPI(title="dMACQ Minutes Signing API")
+
+# Trusted timestamp server (DigiCert RFC 3161 TSA)
+TSA_URL = "http://timestamp.digicert.com"
+timestamper = HTTPTimeStamper(TSA_URL)
 
 
 def embed_names_in_html(html_text, secretary_name, chair_name):
@@ -94,6 +99,7 @@ async def cert_status():
         "cert_subject": cert_subject,
         "error": error_message,
         "audit_log": AUDIT_LOG_FILE,
+        "timestamper_url": TSA_URL
     }
 
 
@@ -142,7 +148,7 @@ async def process_signing(html_text: str, secretary_name: str, chairperson_name:
         signer = signers.SimpleSigner.load_pkcs12(CERT_PATH, passphrase=cert_pass)
         logger.info("✅ Signer loaded successfully")
 
-        logger.info("✍️ Signing PDF using run_in_executor")
+        logger.info("✍️ Signing PDF with TSA timestamp using run_in_executor")
         signed_buf = io.BytesIO()
 
         def blocking_sign():
@@ -151,12 +157,13 @@ async def process_signing(html_text: str, secretary_name: str, chairperson_name:
                 signers.sign_pdf(
                     pdf_writer,
                     PdfSignatureMetadata(
-                        field_name="Signature1",  # ensure a field is created
+                        field_name="Signature1",
                         reason="Digitally signed board minutes",
                         location="dMACQ Software Pvt Ltd, Mumbai, India",
                         contact_info="info@dmacq.com",
                     ),
                     signer=signer,
+                    timestamper=timestamper,  # add trusted timestamp
                     output=signed_buf,
                 )
             signed_buf.seek(0)
