@@ -10,7 +10,7 @@ fonttools==4.59.0
 jinja2==3.1.6
 
 # Digital signatures with PyHanko
-pyHanko==0.29.1
+pyhanko[pyca]==0.29.1
 pyhanko-certvalidator==0.27.0
 cryptography==45.0.5
 oscrypto==1.3.0
