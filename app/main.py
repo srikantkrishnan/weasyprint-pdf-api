@@ -1,8 +1,7 @@
 import os
 import io
-import tempfile
 import logging
-from typing import List, Optional
+from typing import List
 
 from fastapi import FastAPI, File, Form, UploadFile, HTTPException
 from fastapi.responses import StreamingResponse, JSONResponse
@@ -33,95 +32,74 @@ def embed_names_in_html(html_text, secretary_name, chair_name):
         html_text += "\n" + insert_text
     return html_text
 
-
 @app.post("/minutes/signed")
 async def signed_minutes(
     html_file: UploadFile = File(...),
     secretary_name: str = Form(...),
     chairperson_name: str = Form(...),
     pfx_file: UploadFile = File(None),
-    pfx_password: Optional[str] = Form(""),
+    pfx_password: str = Form(""),
     cert_file: UploadFile = File(None),
     key_file: UploadFile = File(None),
-    key_password: Optional[str] = Form(""),
-    chain_files: List[UploadFile] = File(None),
+    key_password: str = Form(""),
+    chain_files: List[UploadFile] = File(None)
 ):
-    # Normalize Swagger behavior for optional files
-    if chain_files:
-        chain_files = [cf for cf in chain_files if getattr(cf, "filename", None)]
-        if not chain_files:
-            chain_files = None
-
     try:
-        # Step 1: Read HTML and embed secretary & chair names
+        # ✅ Normalize empty Swagger behavior for chain_files
+        if chain_files:
+            chain_files = [cf for cf in chain_files if getattr(cf, "filename", None)]
+            if not chain_files:  # if only empty values came through
+                chain_files = None
+
+        # Step 1: Read HTML and embed names
         logger.info("📄 Step 1: Preparing HTML")
         html_bytes = await html_file.read()
         html_text = html_bytes.decode("utf-8")
         modified_html = embed_names_in_html(html_text, secretary_name, chairperson_name)
 
-        # Step 2: Generate unsigned PDF
+        # Step 2: Generate unsigned PDF in memory
         logger.info("🖨️ Step 2: Generating unsigned PDF")
-        unsigned_pdf_bytes = HTML(string=modified_html).write_pdf()
+        unsigned_buf = io.BytesIO()
+        HTML(string=modified_html).write_pdf(unsigned_buf)
+        unsigned_buf.seek(0)
 
-        # Step 3: Setup signing credentials
+        # Step 3: Load signing credentials
         logger.info("🔑 Step 3: Loading signing credentials")
         signer = None
-
         if pfx_file:
             pfx_data = await pfx_file.read()
             signer = signers.SimpleSigner.load_pkcs12(
-                pfx_data,
+                pfx_file=io.BytesIO(pfx_data),
                 passphrase=pfx_password.encode() if pfx_password else None
             )
         elif cert_file and key_file:
             cert_data = await cert_file.read()
             key_data = await key_file.read()
-            chain_data = [await cf.read() for cf in chain_files] if chain_files else []
+            ca_chain_data = []
+            if chain_files:
+                for cf in chain_files:
+                    ca_chain_data.append(await cf.read())
+            signer = signers.SimpleSigner.load(
+                key_file=io.BytesIO(key_data),
+                cert_file=io.BytesIO(cert_data),
+                ca_chain_files=[io.BytesIO(c) for c in ca_chain_data],
+                key_passphrase=key_password.encode() if key_password else None
+            )
+        else:
+            raise HTTPException(status_code=400, detail="No signing credentials provided")
 
-            # Write cert/key/chain into temp files for PyHanko
-            with tempfile.NamedTemporaryFile(delete=False) as cert_tmp, \
-                 tempfile.NamedTemporaryFile(delete=False) as key_tmp:
-                cert_tmp.write(cert_data)
-                key_tmp.write(key_data)
-                cert_tmp.flush()
-                key_tmp.flush()
-
-                chain_paths = []
-                for c in chain_data:
-                    with tempfile.NamedTemporaryFile(delete=False) as chain_tmp:
-                        chain_tmp.write(c)
-                        chain_tmp.flush()
-                        chain_paths.append(chain_tmp.name)
-
-                signer = signers.SimpleSigner.load(
-                    key_file=key_tmp.name,
-                    cert_file=cert_tmp.name,
-                    ca_chain_files=chain_paths,
-                    key_passphrase=key_password.encode() if key_password else None
-                )
-
-                # Cleanup after signer is initialized
-                os.unlink(cert_tmp.name)
-                os.unlink(key_tmp.name)
-                for cp in chain_paths:
-                    os.unlink(cp)
-
-        if not signer:
-            raise HTTPException(status_code=400, detail="No valid signing credentials provided.")
-
-        # Step 4: Apply digital signature
-        logger.info("✍️ Step 4: Signing PDF")
+        # Step 4: Configure metadata
         signature_meta = PdfSignatureMetadata(
             field_name="Signature",
             reason="Document digitally signed by Company Secretary",
             location="dMACQ Software Private Limited, Mumbai, Maharashtra, India",
-            contact_info="info@dmacq.com",
+            contact_info="info@dmacq.com"
         )
 
+        # Step 5: Apply signature
+        logger.info("✍️ Step 4: Signing PDF")
         signed_buf = io.BytesIO()
-        unsigned_buf = io.BytesIO(unsigned_pdf_bytes)
         pdf_writer = IncrementalPdfFileWriter(unsigned_buf)
-
         signers.sign_pdf(
             pdf_writer,
             signature_meta,
@@ -130,11 +108,9 @@ async def signed_minutes(
         )
 
         signed_buf.seek(0)
-        return StreamingResponse(
-            signed_buf,
-            media_type="application/pdf",
-            headers={"Content-Disposition": "attachment; filename=signed_minutes.pdf"},
-        )
+        return StreamingResponse(signed_buf, media_type="application/pdf", headers={
+            "Content-Disposition": "attachment; filename=signed_minutes.pdf"
+        })
 
     except Exception as e:
         logger.error(f"❌ Error signing PDF: {e}", exc_info=True)
