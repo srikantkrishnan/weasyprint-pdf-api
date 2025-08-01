@@ -12,9 +12,19 @@ python-multipart==0.0.20
 jinja2==3.1.6
 pyyaml==6.0.2
 typing-extensions==4.14.1
+
+# Explicit optional deps for pyHanko + WeasyPrint stability
 oscrypto==1.3.0
 tzlocal==5.3.1
 orjson==3.11.1
 uvloop==0.21.0
 watchfiles==1.1.0
 pikepdf==8.12.0
+
+# New deps for OpenSSL-based PDF signing overlay
+reportlab==4.0.9
+PyPDF2==3.0.1
+pymupdf==1.24.2   # PyMuPDF
+
+# Timezone handling
+pytz==2024.1
