@@ -2,7 +2,7 @@ import os
 import io
 import logging
 import asyncio
-from fastapi import FastAPI, File, Form, UploadFile, HTTPException
+from fastapi import FastAPI, File, Form, UploadFile, HTTPException, Query
 from fastapi.responses import StreamingResponse, JSONResponse
 from weasyprint import HTML
 from pyhanko.sign import signers
@@ -39,11 +39,18 @@ TSA_URL = "http://timestamp.digicert.com"
 timestamper = HTTPTimeStamper(TSA_URL)
 
 
-def embed_watermark_in_html(html_text, secretary_name, chair_name, approval_datetime):
-    """Embed watermark only on the last page, above footer."""
+def embed_watermark_in_html(html_text, secretary_name, chair_name, approval_datetime, logo_size: int = 120):
+    """Embed watermark only on the last page, with dynamic logo size."""
     logo_html = ""
     if os.path.exists(LOGO_PATH):
-        logo_html = f'<img src="file://{LOGO_PATH}" width="80" style="display:block;margin:0 auto;opacity:0.2;"/>'
+        logo_html = f'''
+        <img src="file://{LOGO_PATH}"
+             style="display:block;
+                    margin:0 auto;
+                    opacity:0.15;
+                    max-width:{logo_size}px;
+                    height:auto;" />
+        '''
 
     watermark_css = """
     <style>
@@ -159,10 +166,11 @@ async def signed_minutes(
     html_file: UploadFile = File(...),
     secretary_name: str = Form(...),
     chairperson_name: str = Form(...),
+    logo_size: int = Form(120)
 ):
     approval_datetime = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     return await process_signing((await html_file.read()).decode("utf-8"),
-                                 secretary_name, chairperson_name, approval_datetime)
+                                 secretary_name, chairperson_name, approval_datetime, logo_size)
 
 
 @app.post("/preview-watermark")
@@ -170,16 +178,17 @@ async def preview_watermark(
     html_file: UploadFile = File(...),
     secretary_name: str = Form(...),
     chairperson_name: str = Form(...),
+    logo_size: int = Form(120)
 ):
     """Generate a PDF with watermark only (no signing)."""
     approval_datetime = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     temp_pdf_path = os.path.join(PERSIST_DIR, "preview_output.pdf")
 
     try:
-        logger.info("👀 Generating preview PDF with watermark only")
+        logger.info(f"👀 Generating preview PDF with watermark, logo_size={logo_size}")
         modified_html = embed_watermark_in_html(
             (await html_file.read()).decode("utf-8"),
-            secretary_name, chairperson_name, approval_datetime
+            secretary_name, chairperson_name, approval_datetime, logo_size
         )
         HTML(string=modified_html).write_pdf(temp_pdf_path)
 
@@ -213,10 +222,10 @@ async def debug_sign():
     </html>
     """
     approval_datetime = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    return await process_signing(test_html, "Test Secretary", "Test Chairperson", approval_datetime)
+    return await process_signing(test_html, "Test Secretary", "Test Chairperson", approval_datetime, 120)
 
 
-async def process_signing(html_text: str, secretary_name: str, chairperson_name: str, approval_datetime: str):
+async def process_signing(html_text: str, secretary_name: str, chairperson_name: str, approval_datetime: str, logo_size: int):
     temp_pdf_path = os.path.join(PERSIST_DIR, "unsigned_output.pdf")
     try:
         if not os.path.exists(CERT_PATH):
@@ -226,7 +235,7 @@ async def process_signing(html_text: str, secretary_name: str, chairperson_name:
             raise HTTPException(status_code=400, detail="PFX_PASSWORD not set in Render Environment")
 
         logger.info("📄 Embedding watermark into HTML (last page only)")
-        modified_html = embed_watermark_in_html(html_text, secretary_name, chairperson_name, approval_datetime)
+        modified_html = embed_watermark_in_html(html_text, secretary_name, chairperson_name, approval_datetime, logo_size)
 
         logger.info("🖨️ Generating PDF with WeasyPrint")
         HTML(string=modified_html).write_pdf(temp_pdf_path)
