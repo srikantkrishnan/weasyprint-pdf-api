@@ -107,23 +107,19 @@ async def process_signing(html_text: str, secretary_name: str, chairperson_name:
     temp_pdf_path = os.path.join(PERSIST_DIR, "unsigned_output.pdf")
 
     try:
-        # Step 1: Check certificate
         if not os.path.exists(CERT_PATH):
             raise HTTPException(status_code=400, detail="No certificate uploaded. Use /upload-cert first.")
         cert_pass = os.environ.get("PFX_PASSWORD", "").encode()
         if not cert_pass:
             raise HTTPException(status_code=400, detail="Certificate password not set. Please re-upload cert.")
 
-        # Step 2: Embed names
         logger.info("📄 Preparing HTML")
         modified_html = embed_names_in_html(html_text, secretary_name, chairperson_name)
 
-        # Step 3: Generate unsigned PDF
         logger.info("🖨️ Generating PDF with WeasyPrint")
         HTML(string=modified_html).write_pdf(temp_pdf_path)
         logger.info(f"✅ Unsigned PDF written at {temp_pdf_path}")
 
-        # Step 4: Load signer
         logger.info("🔑 Loading signing credentials from PFX")
         signer = signers.SimpleSigner.load_pkcs12(
             pfx_file=CERT_PATH,
@@ -131,7 +127,6 @@ async def process_signing(html_text: str, secretary_name: str, chairperson_name:
         )
         logger.info("✅ Signer loaded successfully")
 
-        # Step 5: Sign PDF in thread
         logger.info("✍️ Signing PDF using run_in_executor")
         signed_buf = io.BytesIO()
 
@@ -144,8 +139,7 @@ async def process_signing(html_text: str, secretary_name: str, chairperson_name:
                         reason="Digitally signed board minutes",
                         location="dMACQ Software Pvt Ltd, Mumbai, India",
                         contact_info="info@dmacq.com",
-                        field_name=None,
-                        existing_fields_only=False,
+                        field_name=None  # Let PyHanko create a new field if needed
                     ),
                     signer=signer,
                     output=signed_buf,
