@@ -9,9 +9,6 @@ from pyhanko.sign import signers
 from pyhanko.pdf_utils.incremental_writer import IncrementalPdfFileWriter
 from pyhanko.sign.signers import PdfSignatureMetadata
 from pyhanko.sign.timestamps import HTTPTimeStamper
-from pyhanko.sign.fields import SigFieldSpec
-from pyhanko.sign.appearance import SimpleTextStampStyle, PdfAppearConfig
-from pyhanko.pdf_utils.layout import BoxConstraints
 from datetime import datetime
 
 # Persistent storage paths
@@ -42,23 +39,56 @@ TSA_URL = "http://timestamp.digicert.com"
 timestamper = HTTPTimeStamper(TSA_URL)
 
 
-def embed_date_in_html(html_text, approval_datetime):
-    """Embed Date of Approval dynamically in the HTML."""
-    insert_text = f"<p><strong>Date of Approval: </strong>{approval_datetime}</p>\n"
+def embed_watermark_in_html(html_text, secretary_name, chair_name, approval_datetime):
+    """Embed watermark only on the last page, above footer."""
+    logo_html = ""
+    if os.path.exists(LOGO_PATH):
+        logo_html = f'<img src="file://{LOGO_PATH}" width="80" style="display:block;margin:0 auto;opacity:0.2;"/>'
+
+    watermark_css = """
+    <style>
+    @page:last {
+        @bottom-center {
+            content: element(watermark);
+        }
+    }
+    #watermark {
+        display: block;
+        text-align: center;
+        opacity: 0.7;
+        font-size: 12px;
+        color: #333;
+    }
+    </style>
+    """
+
+    watermark_div = f"""
+    <div id="watermark">
+        {logo_html}
+        <p><strong>Digitally signed</strong></p>
+        <p>Chairperson: {chair_name}</p>
+        <p>Secretary: {secretary_name}</p>
+        <p>Date of Approval: {approval_datetime}</p>
+        <p><em>dMACQ Board Minutes System</em></p>
+    </div>
+    """
+
     lowered = html_text.lower()
-    if "date of approval" in lowered:
-        # Replace placeholder if exists
-        html_text = html_text.replace("Date of Approval", f"Date of Approval: {approval_datetime}")
+    if "</head>" in lowered:
+        pos = lowered.rfind("</head>")
+        html_text = html_text[:pos] + watermark_css + html_text[pos:]
     else:
-        # If placeholder missing, append at end
-        if "</body>" in lowered:
-            pos = lowered.rfind("</body>")
-            html_text = html_text[:pos] + insert_text + html_text[pos:]
-        elif "</html>" in lowered:
-            pos = lowered.rfind("</html>")
-            html_text = html_text[:pos] + insert_text + html_text[pos:]
-        else:
-            html_text += "\n" + insert_text
+        html_text = "<head>" + watermark_css + "</head>" + html_text
+
+    if "</body>" in lowered:
+        pos = lowered.rfind("</body>")
+        html_text = html_text[:pos] + watermark_div + html_text[pos:]
+    elif "</html>" in lowered:
+        pos = lowered.rfind("</html>")
+        html_text = html_text[:pos] + watermark_div + html_text[pos:]
+    else:
+        html_text += watermark_div
+
     return html_text
 
 
@@ -135,6 +165,42 @@ async def signed_minutes(
                                  secretary_name, chairperson_name, approval_datetime)
 
 
+@app.post("/preview-watermark")
+async def preview_watermark(
+    html_file: UploadFile = File(...),
+    secretary_name: str = Form(...),
+    chairperson_name: str = Form(...),
+):
+    """Generate a PDF with watermark only (no signing)."""
+    approval_datetime = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    temp_pdf_path = os.path.join(PERSIST_DIR, "preview_output.pdf")
+
+    try:
+        logger.info("👀 Generating preview PDF with watermark only")
+        modified_html = embed_watermark_in_html(
+            (await html_file.read()).decode("utf-8"),
+            secretary_name, chairperson_name, approval_datetime
+        )
+        HTML(string=modified_html).write_pdf(temp_pdf_path)
+
+        return StreamingResponse(
+            open(temp_pdf_path, "rb"),
+            media_type="application/pdf",
+            headers={"Content-Disposition": "attachment; filename=preview_minutes.pdf"},
+        )
+    except Exception as e:
+        error_msg = f"❌ Error generating preview: {e}"
+        logger.error(error_msg, exc_info=True)
+        return JSONResponse(status_code=500, content={"error": str(e)})
+    finally:
+        if os.path.exists(temp_pdf_path):
+            try:
+                os.remove(temp_pdf_path)
+                logger.info(f"🗑️ Temp file {temp_pdf_path} deleted after preview")
+            except OSError:
+                pass
+
+
 @app.get("/debug/sign")
 async def debug_sign():
     logger.info("🚦 Debug signing test triggered")
@@ -143,9 +209,6 @@ async def debug_sign():
     <body>
         <h1>Board Meeting Minutes</h1>
         <p>This is a test document generated for signing diagnostics.</p>
-        <p>Secretary/Minute Taker</p>
-        <p>Chairperson/Meeting Leader</p>
-        <p>Date of Approval</p>
     </body>
     </html>
     """
@@ -162,8 +225,8 @@ async def process_signing(html_text: str, secretary_name: str, chairperson_name:
         if not cert_pass:
             raise HTTPException(status_code=400, detail="PFX_PASSWORD not set in Render Environment")
 
-        logger.info("📄 Preparing HTML")
-        modified_html = embed_date_in_html(html_text, approval_datetime)
+        logger.info("📄 Embedding watermark into HTML (last page only)")
+        modified_html = embed_watermark_in_html(html_text, secretary_name, chairperson_name, approval_datetime)
 
         logger.info("🖨️ Generating PDF with WeasyPrint")
         HTML(string=modified_html).write_pdf(temp_pdf_path)
@@ -173,56 +236,24 @@ async def process_signing(html_text: str, secretary_name: str, chairperson_name:
         signer = signers.SimpleSigner.load_pkcs12(CERT_PATH, passphrase=cert_pass)
         logger.info("✅ Signer loaded successfully")
 
-        logger.info("✍️ Adding Secretary + Chair visible signatures")
+        logger.info("✍️ Signing PDF with TSA timestamp")
         signed_buf = io.BytesIO()
 
         def blocking_sign():
             with open(temp_pdf_path, "rb") as unsigned_pdf:
                 pdf_writer = IncrementalPdfFileWriter(unsigned_pdf)
-
-                # Secretary signature field
-                sec_sig = SigFieldSpec(
-                    sig_field_name="SecretarySig",
-                    on_page=-1,  # last page
-                    box=(100, 250, 350, 300),  # adjust coordinates
-                )
-                sec_sig.apply(pdf_writer)
-
-                # Chairperson signature field
-                chair_sig = SigFieldSpec(
-                    sig_field_name="ChairSig",
-                    on_page=-1,
-                    box=(100, 180, 350, 230),  # adjust coordinates
-                )
-                chair_sig.apply(pdf_writer)
-
-                # Appearance style
-                stamp_style_secretary = SimpleTextStampStyle(
-                    stamp_text=f"Digitally signed by {secretary_name}\nRole: Secretary\nDate: {approval_datetime}",
-                    background=LOGO_PATH if os.path.exists(LOGO_PATH) else None,
-                    text_box_style=BoxConstraints(width=240, height=100),
-                )
-                stamp_style_chair = SimpleTextStampStyle(
-                    stamp_text=f"Digitally signed by {chairperson_name}\nRole: Chairperson\nDate: {approval_datetime}",
-                    background=LOGO_PATH if os.path.exists(LOGO_PATH) else None,
-                    text_box_style=BoxConstraints(width=240, height=100),
-                )
-
-                # Sign with Chair signature (main signer)
                 signers.sign_pdf(
                     pdf_writer,
                     PdfSignatureMetadata(
-                        field_name="ChairSig",
+                        field_name="Signature1",
                         reason="Digitally signed board minutes",
                         location="dMACQ Software Pvt Ltd, Mumbai, India",
                         contact_info="info@dmacq.com",
                     ),
                     signer=signer,
                     timestamper=timestamper,
-                    appearance_config=PdfAppearConfig(stamp_style=stamp_style_chair),
                     output=signed_buf,
                 )
-
             signed_buf.seek(0)
             return signed_buf
 
