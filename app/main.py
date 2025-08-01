@@ -1,86 +1,110 @@
 import io
 import logging
 import tempfile
-import subprocess
+from datetime import datetime
+import pytz
+
 from fastapi import FastAPI, UploadFile, Form
 from fastapi.responses import FileResponse, JSONResponse
 from weasyprint import HTML
-import pikepdf
-from datetime import datetime
+from cryptography.hazmat.primitives.serialization import load_pem_private_key
+from cryptography.hazmat.backends import default_backend
+from cryptography import x509
+
+from pyhanko.sign import signers
+from pyhanko.sign.signers.pdf_signer import PdfSigner, PdfSignatureMetadata
+from pyhanko.sign.fields import SigFieldSpec
+from pyhanko_certvalidator.registry import SimpleCertificateStore
+from pyhanko.sign.validation import ValidationContext
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-app = FastAPI(title="WeasyPrint OpenSSL Signing API")
+app = FastAPI(title="dMACQ Minutes Signing API")
+
+
+# Validate certificate + private key match
+def check_cert_key_match(cert_pem: bytes, key_pem: bytes):
+    cert = x509.load_pem_x509_certificate(cert_pem, default_backend())
+    key = load_pem_private_key(key_pem, password=None, backend=default_backend())
+    try:
+        cert.public_key().public_numbers()
+        key.public_key().public_numbers()
+    except Exception as e:
+        raise ValueError("Certificate and private key mismatch") from e
+    return cert, key
+
 
 @app.post("/minutes/signed")
-async def sign_minutes(
+async def signed_minutes(
     html_file: UploadFile,
     cert_file: UploadFile,
     key_file: UploadFile,
-    signer_name: str = Form("Secretary"),
-    signer_email: str = Form("info@dmacq.com")
+    secretary_name: str = Form(...),
+    chairperson_name: str = Form(...)
 ):
     try:
-        logger.info("📄 Step 1: Generating unsigned PDF from HTML")
+        # Step 1: Convert HTML to PDF
+        logger.info("📄 Step 1: Converting HTML to PDF")
         html_content = await html_file.read()
-        cert_bytes = await cert_file.read()
-        key_bytes = await key_file.read()
-
-        # Save unsigned PDF
         with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp_pdf:
             HTML(string=html_content.decode("utf-8")).write_pdf(tmp_pdf.name)
             unsigned_pdf_path = tmp_pdf.name
 
-        # Save cert & key to temp files
-        with tempfile.NamedTemporaryFile(delete=False, suffix=".pem") as cert_tmp:
-            cert_tmp.write(cert_bytes)
-            cert_path = cert_tmp.name
-        with tempfile.NamedTemporaryFile(delete=False, suffix=".pem") as key_tmp:
-            key_tmp.write(key_bytes)
-            key_path = key_tmp.name
+        # Step 2: Load certificates
+        logger.info("🔑 Step 2: Validating certificate and private key")
+        cert_bytes = await cert_file.read()
+        key_bytes = await key_file.read()
+        cert, private_key = check_cert_key_match(cert_bytes, key_bytes)
 
-        logger.info("🔏 Step 2: Applying OpenSSL digital signature")
-        signed_pdf_path = tempfile.NamedTemporaryFile(delete=False, suffix=".pdf").name
+        # Prepare certificate store
+        cert_store = SimpleCertificateStore()
+        cert_store.register(cert)
+        validation_context = ValidationContext(trust_roots=cert_store)
 
-        # OpenSSL smime signing (binary DER, attach signature inside PDF)
-        cmd = [
-            "openssl", "smime", "-sign",
-            "-binary", "-in", unsigned_pdf_path,
-            "-signer", cert_path,
-            "-inkey", key_path,
-            "-outform", "DER", "-out", signed_pdf_path
-        ]
-        subprocess.run(cmd, check=True)
+        # Step 3: Create signer
+        logger.info("✍️ Step 3: Creating signer")
+        signer = signers.SimpleSigner(
+            signing_cert=cert,
+            signing_key=private_key,
+            cert_registry=cert_store
+        )
 
-        logger.info("🖊️ Step 3: Adding visual signature stamp")
-        with pikepdf.open(unsigned_pdf_path) as pdf:
-            page = pdf.pages[0]
-            timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-            note = f"Signed by {signer_name} ({signer_email}) on {timestamp}"
+        # Step 4: Add metadata + visual stamp
+        logger.info("🖊 Step 4: Adding metadata + stamp")
+        ist = pytz.timezone("Asia/Kolkata")
+        timestamp = datetime.now(ist).strftime("%d %B %Y, %I:%M %p IST")
 
-            # Add annotation (visible text stamp)
-            page.add_text_annot(
-                rect=pikepdf.Rect(50, 50, 400, 100),
-                text=note
-            )
+        pdf_meta = PdfSignatureMetadata(
+            field_name="dMACQ_Signature",
+            reason=f"Minutes signed by Secretary {secretary_name} and Chairperson {chairperson_name}",
+            location="Mumbai, India",
+            contact_info="info@dmacq.com",
+        )
 
-            pdf.save(signed_pdf_path)
+        sig_field_spec = SigFieldSpec(sig_field_name="dMACQ_Signature")
+
+        # Step 5: Sign PDF
+        logger.info("🔏 Step 5: Signing PDF")
+        signed_output = tempfile.NamedTemporaryFile(delete=False, suffix=".pdf")
+
+        pdf_signer = PdfSigner(pdf_meta, signer=signer, new_field_spec=sig_field_spec)
+        with open(unsigned_pdf_path, "rb") as inf:
+            pdf_signer.sign_pdf(inf, output=signed_output)
 
         logger.info("✅ PDF signed successfully")
+
         return FileResponse(
-            signed_pdf_path,
+            signed_output.name,
             media_type="application/pdf",
             filename="signed_minutes.pdf"
         )
 
-    except subprocess.CalledProcessError as se:
-        logger.error(f"OpenSSL signing failed: {se}")
-        return JSONResponse(status_code=500, content={"error": f"OpenSSL signing failed: {str(se)}"})
     except Exception as e:
         logger.error("❌ Error signing PDF", exc_info=True)
         return JSONResponse(status_code=500, content={"error": str(e)})
 
+
 @app.get("/")
 def root():
-    return {"message": "WeasyPrint OpenSSL Signing API is running 🚀"}
+    return {"message": "dMACQ Minutes Signing API is running 🚀"}
