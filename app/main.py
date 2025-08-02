@@ -4,6 +4,7 @@ import logging
 import asyncio
 from fastapi import FastAPI, File, Form, UploadFile, HTTPException
 from fastapi.responses import StreamingResponse, JSONResponse
+from fastapi.middleware.cors import CORSMiddleware
 from weasyprint import HTML
 from pyhanko.sign import signers
 from pyhanko.pdf_utils.incremental_writer import IncrementalPdfFileWriter
@@ -37,6 +38,22 @@ app = FastAPI(title="dMACQ Minutes Signing API")
 TSA_URL = "http://timestamp.digicert.com"
 timestamper = HTTPTimeStamper(TSA_URL)
 
+# ✅ CORS Configuration
+origins = [
+    "https://pulse.dmacq.com",  # Production
+    "https://3c765d59-016f-4d50-bdcc-20491cc9a7e6.lovableproject.com",  # Current dev
+    "https://*.lovableproject.com",  # Wildcard for all Lovable dev instances
+    "http://localhost:3000",  # Local dev React
+    "http://localhost:5173",  # Local dev Vite
+]
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=origins,
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 @app.post("/upload-cert")
 async def upload_cert(pfx_file: UploadFile = File(...)):
@@ -50,7 +67,6 @@ async def upload_cert(pfx_file: UploadFile = File(...)):
         error_msg = f"❌ Error uploading certificate: {e}"
         logger.error(error_msg, exc_info=True)
         raise HTTPException(status_code=500, detail=error_msg)
-
 
 @app.get("/cert/status")
 async def cert_status():
@@ -83,7 +99,6 @@ async def cert_status():
         "timestamper_url": TSA_URL,
     }
 
-
 @app.post("/minutes/signed")
 async def signed_minutes(
     html_file: UploadFile = File(...),
@@ -98,7 +113,6 @@ async def signed_minutes(
         approval_datetime
     )
 
-
 @app.get("/debug/sign")
 async def debug_sign():
     logger.info("🚦 Debug signing test triggered")
@@ -112,7 +126,6 @@ async def debug_sign():
     """
     approval_datetime = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     return await process_signing(test_html, "Test Secretary", "Test Chairperson", approval_datetime)
-
 
 async def process_signing(html_text: str, secretary_name: str, chairperson_name: str, approval_datetime: str):
     temp_pdf_path = os.path.join(PERSIST_DIR, "unsigned_output.pdf")
@@ -174,7 +187,6 @@ async def process_signing(html_text: str, secretary_name: str, chairperson_name:
                 logger.info(f"🗑️ Temp file {temp_pdf_path} deleted")
             except OSError as cleanup_err:
                 logger.warning(f"⚠️ Failed to delete temp file: {cleanup_err}")
-
 
 @app.get("/health")
 async def health_check():
