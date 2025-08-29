@@ -48,3 +48,8 @@ async def print_pdf(body: HTMLPayload):
 
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"PDF generation failed: {e}")
+
+# ✅ Health-check endpoint for browser/Lovable GET call
+@app.get("/pdfs")
+def check_service():
+    return {"status": "WeasyPrint PDF service is up!"}
