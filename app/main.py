@@ -6,38 +6,45 @@ from starlette.responses import StreamingResponse
 import io
 
 class HTMLPayload(BaseModel):
-    html: str
+    htmlContent: str  # ← Changed from 'html' to match frontend
+    title: str = "Document"
 
 app = FastAPI()
 
-# ✅ Add CORS settings to allow all relevant frontend domains
+# ✅ CORS settings
 origins = [
     "http://localhost",
     "http://localhost:3000",
-    "https://pulse.dmacq.com",            # Production domain
-    "https://dev.dmacq.com",              # Optional dev subdomain
-    "https://*.lovableproject.com"        # Wildcard not supported natively, see note below
+    "http://localhost:5173",
+    "http://localhost:8080",
+    "https://pulse.dmacq.com",
+    "https://dev.dmacq.com",
 ]
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[],
-    allow_origin_regex="https://.*\.lovableproject\.com",  # Allows all dev instances
+    allow_origins=origins,  # ← NOW USING THE LIST!
+    allow_origin_regex=r"https://.*\.lovableproject\.com",
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
+    expose_headers=["Content-Disposition"],
 )
 
-@app.post("/pdfs")
-async def print_pdf(body: HTMLPayload):
+# ✅ Health endpoint - matches frontend's /health call
+@app.get("/health")
+def health_check():
+    return {"status": "healthy", "service": "weasyprint-pdf-generator"}
+
+# ✅ PDF generation endpoint - matches frontend's /generate-pdf-blob call
+@app.post("/generate-pdf-blob")
+async def generate_pdf_blob(body: HTMLPayload):
     try:
-        # Generate PDF in memory
-        byte_string = HTML(string=body.html).write_pdf()
+        byte_string = HTML(string=body.htmlContent).write_pdf()
         pdf_stream = io.BytesIO(byte_string)
 
-        # ✅ Force Swagger/Browser to treat response as a file download
         headers = {
-            "Content-Disposition": "attachment; filename=minutes.pdf"
+            "Content-Disposition": f'attachment; filename="{body.title}.pdf"'
         }
 
         return StreamingResponse(
@@ -49,7 +56,11 @@ async def print_pdf(body: HTMLPayload):
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"PDF generation failed: {e}")
 
-# ✅ Health-check endpoint for browser/Lovable GET call
+# ✅ Keep legacy /pdfs endpoints for backward compatibility
+@app.post("/pdfs")
+async def print_pdf_legacy(body: HTMLPayload):
+    return await generate_pdf_blob(body)
+
 @app.get("/pdfs")
-def check_service():
+def check_service_legacy():
     return {"status": "WeasyPrint PDF service is up!"}
